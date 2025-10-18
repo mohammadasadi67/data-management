@@ -416,10 +416,14 @@ def read_production_data(df_raw_sheet, uploaded_file_name, selected_sheet_name, 
         headers = [h if h else f"Unnamed_Col_{i}" for i, h in enumerate(combined_headers)]
 
     except IndexError as e:
-        st.error(
-            f"Error in file '{uploaded_file_name}' (Sheet: '{selected_sheet_name}'): Production data headers not found in range D2:P3 of your Excel sheet.
- (Error: {e}) Please check the sheet format.")
-        return pd.DataFrame()
+       st.error(
+    f"""
+    Error in file '{uploaded_file_name}' (Sheet: '{selected_sheet_name}'): 
+    Production data headers not found in range D2:P3 of your Excel sheet.
+    (Error: {e}) Please check the sheet format.
+    """
+)
+return pd.DataFrame()
 
     # Data is in Excel rows 4-9 (iloc 3-8) from column D (iloc 3) to P (iloc 15)
     data = df_raw_sheet.iloc[3:9, 3:16].copy()
