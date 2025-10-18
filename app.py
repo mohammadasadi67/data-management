@@ -153,7 +153,6 @@ def upload_to_supabase(uploaded_files):
 @st.cache_data(ttl=3600, show_spinner="دریافت اطلاعات از پایگاه داده...")
 def load_data_from_supabase_tables(table_name):
     """بارگذاری داده‌ها از جداول Supabase."""
-    # (کد مربوط به بارگذاری جداول دیتابیس بدون تغییر)
     try:
         response = supabase.table(table_name).select("*").execute()
         data = response.data
@@ -191,7 +190,6 @@ def load_data_from_supabase_tables(table_name):
         return pd.DataFrame()
 
 def insert_to_db(df, table_name):
-    # (کد درج داده به دیتابیس بدون تغییر)
     if df.empty:
         return True
     
@@ -216,7 +214,6 @@ def insert_to_db(df, table_name):
         return False
 
 def calculate_oee_metrics(df_prod, df_err):
-    # (کد محاسبه OEE بدون تغییر)
     if df_prod.empty:
         return 0, 0, 0, 0, 0, 0, 0, 0 
 
@@ -240,16 +237,17 @@ def calculate_oee_metrics(df_prod, df_err):
     performance_pct = (theoretical_run_time_min / operating_time_min) * 100 if operating_time_min > 0 else 0
     performance_pct = min(performance_pct, 100) 
         
+    # --- فرمول جدید OEE ---
     oee_pct = (availability_pct / 100) * (performance_pct / 100) * (quality_pct / 100) * 100
     
-    total_potential_packages = total_planned_time_min * ideal_cycle_rate_per_min
-    line_efficiency_pct = (total_good_qty / total_potential_packages) * 100 if total_potential_packages > 0 else 0
-    line_efficiency_pct = min(line_efficiency_pct, 100)
+    # --- فرمول جدید Line Efficiency (جایگزین شده با OEE برای سادگی و وضوح) ---
+    # فرمول قدیمی راندمان خط (Total Potential Packages) حذف شده است.
+    line_efficiency_pct = oee_pct 
     
     return oee_pct, line_efficiency_pct, availability_pct, performance_pct, quality_pct, total_down_time_min, total_good_qty, total_pack_qty
 
 # --- تابع جدید برای لیست کردن آرشیو Storage با قابلیت عیب‌یابی (DEBUGGING) ---
-@st.cache_data(ttl=60) # کش به مدت 60 ثانیه برای رفرش سریع
+@st.cache_data(ttl=60) 
 def list_archived_files():
     """دریافت لیست فایل‌های موجود در Storage (آرشیو) با نمایش خطاهای احتمالی."""
     st.info(f"در حال تلاش برای لیست کردن فایل‌ها از باکت: **{ARCHIVE_BUCKET}**")
@@ -420,7 +418,6 @@ elif st.session_state.page == "🗄️ Data Archive":
     st.markdown("---")
     st.subheader("۲. حذف تمام داده‌های دیتابیس (خطرناک!)")
     
-    # (بقیه کد صفحه آرشیو بدون تغییر)
     st.error("⚠️ هشدار: حذف تمام داده‌های جدول تولید یا خطا. این عمل غیرقابل بازگشت است.")
 
     table_to_delete = st.selectbox(
@@ -453,7 +450,6 @@ elif st.session_state.page == "🗄️ Data Archive":
 
 # --- صفحات دیگر (بدون تغییر) ---
 elif st.session_state.page == "📧 Contact Me":
-    # (محتوای صفحه تماس با من)
     st.header("📧 تماس با توسعه‌دهنده")
     st.markdown("---")
     st.markdown("""
@@ -482,7 +478,6 @@ elif st.session_state.page == "📧 Contact Me":
 
 
 elif st.session_state.page == "📈 Advanced Trend Analysis":
-    # (محتوای صفحه تحلیل روند بدون تغییر)
     st.header("📈 تحلیل روند پیشرفته (Trend Analysis)")
 
     df_prod_all = load_data_from_supabase_tables(PROD_TABLE)
@@ -570,7 +565,6 @@ elif st.session_state.page == "📈 Advanced Trend Analysis":
 
 
 elif st.session_state.page == "📊 Dashboard & KPIs":
-    # (محتوای صفحه داشبورد بدون تغییر)
     st.header("📊 داشبورد تحلیل جامع عملکرد")
     
     # --- Connection Status Check ---
@@ -643,7 +637,8 @@ elif st.session_state.page == "📊 Dashboard & KPIs":
         # --- نمایش KPIs (فوق گرافیکی و حرفه‌ای) ---
         # ----------------------------------------------------------------------------------
         st.markdown("### شاخص‌های کلیدی عملکرد (KPIs)")
-        col1, col2, col3, col4, col5 = st.columns(5)
+        # کاهش تعداد ستون‌ها به ۴ مورد اصلی
+        col1, col2, col3, col4 = st.columns(4) 
         
         def display_metric_pro(col, label, value, color_threshold=85):
             color = '#2ECC71' if value >= color_threshold else ('#FFC300' if value >= (color_threshold-15) else '#FF4B4B')
@@ -665,7 +660,25 @@ elif st.session_state.page == "📊 Dashboard & KPIs":
         display_metric_pro(col2, "Availability (دسترسی)", availability_pct, color_threshold=85)
         display_metric_pro(col3, "Performance (عملکرد)", performance_pct, color_threshold=85)
         display_metric_pro(col4, "Quality (کیفیت)", quality_pct, color_threshold=95)
-        display_metric_pro(col5, "Line Efficiency (راندمان خط)", line_efficiency_pct, color_threshold=70)
+        
+        # --- نمودار میله‌ای OEE و Line Efficiency (جدید) ---
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.subheader("مقایسه OEE و Line Efficiency")
+        
+        bar_data = pd.DataFrame({
+            "Metric": ["OEE (اثربخشی کلی)", "Line Efficiency (راندمان خط)"],
+            "Value": [oee_pct, line_efficiency_pct]
+        })
+
+        fig_bar = px.bar(bar_data, x="Metric", y="Value",
+                         title="مقایسه دو شاخص اصلی کارایی",
+                         labels={"Value": "درصد (%)", "Metric": ""},
+                         color="Metric",
+                         color_discrete_map={"OEE (اثربخشی کلی)": "#3498DB", "Line Efficiency (راندمان خط)": "#E67E22"},
+                         template="plotly_dark",
+                         text_auto='.1f')
+        fig_bar.update_layout(yaxis_range=[0, 100], height=400, showlegend=False)
+        st.plotly_chart(fig_bar, use_container_width=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
 
