@@ -21,7 +21,7 @@ st.title("📊 داشبورد تحلیل تولید و OEE")
 
 # --- Supabase Configuration (تایید شده) ---
 SUPABASE_URL = "https://rlutsxvghmhrgcnqbmch.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdXRzeHZnaG1ocmdjbnFibWNoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NTEyODk5MSwiZXhwIjoyMDYwNzA0OTkxfQ.VPxJbrPUw4E-MyRGklQMcxveUTznNlWLhPO-mqrHv9c"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdXRzeHZnaG1ocmdjbnFibWNoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NTEyODk5MSwiZXhwIjoyMDYwNzA0OTkxfQ.VPxbrPUw4E-MyRGklQMcxveUTznNlWLhPO-mqrHv9c"
 
 # --- DB Table Names ---
 PROD_TABLE = "production_data"
@@ -158,7 +158,7 @@ def upload_to_supabase(uploaded_files, bucket_name="production-archive"):
 def load_data_from_supabase_tables(table_name):
     """بارگذاری داده‌ها از جداول Supabase با رفع مشکل Case Sensitivity."""
     try:
-        # 🚨 FIX 1: Removed .order("date") to prevent the 'column does not exist' error.
+        # Load all data without ordering in DB query
         response = supabase.table(table_name).select("*").execute()
         data = response.data
         if not data:
@@ -166,7 +166,7 @@ def load_data_from_supabase_tables(table_name):
         
         df = pd.DataFrame(data)
         
-        # 🚨 FIX 2: Check for both 'date' (lowercase) and 'Date' (uppercase) and standardize to 'Date' (Python use)
+        # Check for date column case and standardize to 'Date'
         date_col_in_db = None
         if 'date' in df.columns:
             date_col_in_db = 'date'
@@ -175,24 +175,25 @@ def load_data_from_supabase_tables(table_name):
             
         if date_col_in_db:
             df['Date'] = pd.to_datetime(df[date_col_in_db]).dt.date
-            # Clean up the original column if it was lowercase
             if date_col_in_db == 'date': 
                 df.drop(columns=['date'], inplace=True, errors='ignore')
             
-        # Re-sort the DataFrame by the standardized 'Date' column in Python
+        # Sort the DataFrame by the standardized 'Date' column in Python
         if 'Date' in df.columns:
             df = df.sort_values(by='Date', ascending=True).reset_index(drop=True)
 
-        # اطمینان از تبدیل ستون‌ها به اعداد
+        # Ensure numeric columns are correct
         for col in ['Duration', 'PackQty', 'Waste', 'Ton', 'Capacity', 'Manpower']:
-            if col.lower() in df.columns: 
-                df[col] = pd.to_numeric(df[col.lower()], errors='coerce').fillna(0)
+            col_lower = col.lower()
+            if col_lower in df.columns: 
+                df[col] = pd.to_numeric(df[col_lower], errors='coerce').fillna(0)
             elif col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         
         return df
 
     except Exception as e:
+        # st.error(f"Error loading table {table_name}: {e}")
         return pd.DataFrame()
 
 def insert_to_db(df, table_name):
@@ -385,7 +386,7 @@ elif st.session_state.page == "Data Archive":
     if delete_button_clicked:
         if delete_password == ARCHIVE_DELETE_PASSWORD:
             try:
-                # 🚨 FIX 3: Removed column name dependency for deletion - safe operation
+                # Safe deletion using a filter
                 supabase.table(table_to_delete).delete().neq('id', '0').execute() 
                 st.cache_data.clear() 
                 st.success(f"✅ تمام داده‌های جدول **{table_to_delete}** با موفقیت حذف شدند.")
@@ -399,10 +400,11 @@ elif st.session_state.page == "Data Archive":
 elif st.session_state.page == "Data Analyzing Dashboard":
     st.header("📈 داشبورد تحلیل OEE و تولید")
     
-    # --- Connection Status Check ---
+    # --- Connection Status Check (FIXED) ---
     try:
-        prod_count_response = supabase.table(PROD_TABLE).select("count()", count='exact').execute() 
-        err_count_response = supabase.table(ERROR_TABLE).select("count()", count='exact').execute() 
+        # 🚨 FIX: Using select("*", count='exact').limit(0) is the correct and safest way to get row count via PostgREST
+        prod_count_response = supabase.table(PROD_TABLE).select("*", count='exact').limit(0).execute() 
+        err_count_response = supabase.table(ERROR_TABLE).select("*", count='exact').limit(0).execute() 
         
         prod_count = prod_count_response.count
         err_count = err_count_response.count
