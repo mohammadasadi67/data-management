@@ -22,7 +22,7 @@ st.set_page_config(
 # --- Supabase Configuration (Hardcoded) ---
 # این مقادیر از فایل اصلی شما گرفته شده‌اند
 SUPABASE_URL = "https://rlutsxvghmhrgcnqbmch.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdXRzeHZnaG1ocmdjbnFibWNoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NTEyODk5MSwiZXhwIjoyMDYwNzA0OTkxfQ.VPxbrPUw4E-MyRGklQMcxveUTznNlWLhPO-mqrHv9c"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdXRzeHZnaG1ocmdjbnFibWNoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDUxMjg5OTEsImV4cCI6MjA2MDcwNDk5MX0.hM-WA6setQ_PZ13rOBEoy2a3rn7wQ6wLFMV9SyBWfHE"
 ARCHIVE_DELETE_PASSWORD = "beautifulmind"
 
 @st.cache_resource
