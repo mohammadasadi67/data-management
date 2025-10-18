@@ -143,7 +143,7 @@ def download_from_supabase(filename):
         except Exception as e:
             error_message = str(e)
             if "not_found" in error_message.lower() or (
-                    "statusCode" in getattr(e, '__dict__', {}) and getattr(e, '__dict__', {}).get('statusCode') == 404):
+                "statusCode" in getattr(e, '__dict__', {}) and getattr(e, '__dict__', {}).get('statusCode') == 404):
                 time.sleep(retry_delay_seconds)
             else:
                 st.error(f"Error downloading file '{filename}' on attempt {attempt + 1}: {e}")
@@ -276,8 +276,7 @@ def convert_duration_to_minutes(duration_val):
                 except ValueError:
                     pass
             # Fallback if not HHMM or HHMM conversion failed, assume it's raw minutes or hours
-            # This part is a bit ambiguous without exact Excel input examples.
-            # Assuming here that a raw float could be hours, e.g. 2.5 for 2.5 hours.
+            # Treat raw float as hours and convert to minutes
             return float(duration_val) * 60  # Treat raw float as hours and convert to minutes
 
     # Case 5: String (e.g., "0:30", "1:15", "30", "730", "2.5")
@@ -408,6 +407,7 @@ def read_production_data(df_raw_sheet, uploaded_file_name, selected_sheet_name, 
     """
     Reads production data from the Excel sheet.
     Accepts file_date_obj (datetime.date) to assign to each row.
+    UPDATED: Calculate Target_Hour using NominalSpeed (Capacity).
     """
     try:
         # Headers are in Excel rows 2 and 3 (iloc 1 and 2) from column D (iloc 3) to P (iloc 15)
@@ -447,7 +447,7 @@ def read_production_data(df_raw_sheet, uploaded_file_name, selected_sheet_name, 
         "finish": "End",  # Assumed original header, to be mapped to "End"
         "time": "Duration_Original",  # Original duration column, not used for final 'Duration'
         "production title": "Product",
-        "cap": "Capacity",
+        "cap": "Capacity", # This is the Nominal Speed
         "manpower": "Manpower",
         "quanity": "PackQty",
         "date": "ProdDate_Original",  # Original date column, often empty or redundant
@@ -468,8 +468,8 @@ def read_production_data(df_raw_sheet, uploaded_file_name, selected_sheet_name, 
     data['ProductionTypeForTon'] = determined_machine_type_for_sheet
 
     # Ensure all required columns exist, adding them as NA if missing, and defaulting numeric ones to 0
-    required_cols = ["Start", "End", "Product", "Capacity", "Manpower", "PackQty", "Date", "Waste",
-                     "ProductionTypeForTon"]
+    required_cols = ["Start", "End", "Product", "Capacity", "Manpower", "PackQty", "Date", 
+                     "Waste", "ProductionTypeForTon"]
     for col in required_cols:
         if col not in data.columns:
             st.warning(
@@ -493,7 +493,8 @@ def read_production_data(df_raw_sheet, uploaded_file_name, selected_sheet_name, 
     data["EndTime"] = data["End"].apply(convert_time)
 
     # *** IMPORTANT CHANGE: Handle duration crossing midnight ***
-    # If EndTime is less than StartTime, it means the time crosses midnight. Add 24 hours to EndTime.
+    # If EndTime is less than StartTime, it means the time crosses midnight.
+    # Add 24 hours to EndTime.
     data['EndTimeAdjusted'] = data.apply(
         lambda row: row['EndTime'] + 24 if row['EndTime'] < row['StartTime'] else row['EndTime'], axis=1)
 
@@ -505,28 +506,41 @@ def read_production_data(df_raw_sheet, uploaded_file_name, selected_sheet_name, 
     # Convert numeric columns, coercing errors to NaN and then filling with 0
     data["PackQty"] = pd.to_numeric(data["PackQty"], errors="coerce").fillna(0)
     data["Waste"] = pd.to_numeric(data["Waste"], errors="coerce").fillna(0)
-    data["Capacity"] = pd.to_numeric(data["Capacity"], errors="coerce").fillna(0)
+    
+    # NEW: Use 'Capacity' as 'NominalSpeed'
+    data["NominalSpeed"] = pd.to_numeric(data["Capacity"], errors="coerce").fillna(0)
+    data = data.drop(columns=['Capacity'], errors='ignore') # Remove the old Capacity column
     data["Manpower"] = pd.to_numeric(data["Manpower"], errors="coerce").fillna(0)
 
     # Calculate Ton - this calculation is per-row and correct here
     data["Ton"] = data.apply(calculate_ton, axis=1)
 
-    # NEW: Calculate Potential Production and per-row Efficiency
-    data['PotentialProduction'] = data['Capacity'] * data['Duration']
-    # Calculate Efficiency(%), handling potential division by zero
+    # NEW: Calculate Target Hour (Production Quantity / Nominal Speed)
+    # Target Hour is in hours
+    data['Target_Hour'] = np.where(
+        data['NominalSpeed'] > 0,
+        data['PackQty'] / data['NominalSpeed'],
+        0
+    )
+    
+    # Keep previous efficiency calculation (PotentialProduction and Efficiency(%)) for the raw data table only.
+    # It represents efficiency based on *actual* running time (Duration).
+    data['PotentialProduction'] = data['NominalSpeed'] * data['Duration']
     data['Efficiency(%)'] = np.where(
         data['PotentialProduction'] > 0,
         (data['PackQty'] / data['PotentialProduction']) * 100,
         0
     )
 
-    # Waste(%) and Efficiency(%) are now calculated AFTER aggregation for charts,
-    # so we don't create them here at the row-level.
-
     # Select and order final columns for the output DataFrame
-    # Added "Date" to final_cols
-    final_cols = ["Date", "Product", "Capacity", "Manpower", "Duration", "PackQty", "Waste", "Ton",
-                  "PotentialProduction", "Efficiency(%)", "ProductionTypeForTon"]
+    final_cols = ["Date", "Product", "NominalSpeed", "Manpower", "Duration", "PackQty", "Waste", "Ton",
+                  "PotentialProduction", "Efficiency(%)", "Target_Hour", "ProductionTypeForTon"]
+    
+    # Ensure all columns exist before selecting
+    for col in final_cols:
+        if col not in data.columns:
+            data[col] = 0 # Add missing columns (especially 'Target_Hour')
+
     data = data[[col for col in final_cols if col in data.columns]]
 
     return data
@@ -535,51 +549,157 @@ def read_production_data(df_raw_sheet, uploaded_file_name, selected_sheet_name, 
 def read_error_data(df_raw_sheet, sheet_name_for_debug="Unknown Sheet", uploaded_file_name_for_debug="Unknown File", file_date_obj=None):
     """
     Reads error data from the Excel sheet.
-    Accepts file_date_obj (datetime.date) to assign to each row.
+    NEW LOGIC: Finds the row with 'f12' header, unpivots columns f12 to f100 
+    (which contain duration in minutes) into Error and Duration rows.
     """
     try:
-        # Error data from G12:H1000 (iloc 11:1000 for rows, 6:8 for columns)
-        raw_errors_df = df_raw_sheet.iloc[11:1000, 6:8].copy()
-        raw_errors_df.columns = ["RawErrorName", "RawDuration"]
+        # 1. Find the header row containing 'f12' (case-insensitive)
+        header_row = None
+        for r in range(df_raw_sheet.shape[0]):
+             if any(str(c).lower().strip().startswith('f12') for c in df_raw_sheet.iloc[r]):
+                 header_row = r
+                 break
+        
+        if header_row is None:
+             # st.info(f"Info: No 'f12' header found for error data in {uploaded_file_name_for_debug}/{sheet_name_for_debug}.")
+             return pd.DataFrame() 
 
-        # Apply conversion to minutes for error durations
-        raw_errors_df["RawDuration"] = raw_errors_df["RawDuration"].apply(convert_duration_to_minutes)
-
-        # Clean RawErrorName: fillna, convert to string, strip whitespace
-        raw_errors_df["RawErrorName"] = raw_errors_df["RawErrorName"].fillna('').astype(str).str.strip()
-
-        # Filter out rows where RawErrorName is an empty string after stripping
-        df_filtered = raw_errors_df[raw_errors_df["RawErrorName"] != ''].copy()
-
-        # Aggregate durations by error name
-        aggregated_errors = df_filtered.groupby("RawErrorName")["RawDuration"].sum().reset_index()
-        aggregated_errors.columns = ["Error", "Duration"]
-
-        df_final_errors = aggregated_errors.copy()
-
-        # Add Date column for consistency with production data and trend analysis
-        if file_date_obj is not None:
-            df_final_errors['Date'] = file_date_obj
-        else:
-            df_final_errors['Date'] = datetime.now().date() # Fallback
-
-        # Add MachineType column to error data for filtering
-        df_final_errors['MachineType'] = determine_machine_type(sheet_name_for_debug)
-
-        if df_final_errors.empty:
+        # 2. Reread the error section with the correct header
+        error_section_df = df_raw_sheet.iloc[header_row:].copy()
+        error_section_df.columns = error_section_df.iloc[0].astype(str).str.lower().str.strip() # Use the identified row as header (lowercase and stripped)
+        error_section_df = error_section_df[1:].reset_index(drop=True) # Data rows below header
+        
+        # 3. Select fXX columns
+        error_duration_cols_pattern = [f'f{i}' for i in range(12, 101)] 
+        # Filter for existing columns that start with 'f' followed by the code
+        cols_to_melt = [col for col in error_section_df.columns if col in error_duration_cols_pattern]
+        
+        if not cols_to_melt:
+            # st.info(f"Info: No f12 to f100 columns found after header detection in {uploaded_file_name_for_debug}/{sheet_name_for_debug}.")
             return pd.DataFrame()
 
-        return df_final_errors
+        # 4. Melt (Unpivot) the DataFrame
+        # We don't have an ID column, so we melt the values and rely on the date later.
+        df_long = error_section_df.melt(
+            value_vars=cols_to_melt,
+            var_name='RawErrorColumn',
+            value_name='Duration' # This is already the RawDuration in minutes
+        )
+        
+        # 5. Process Duration and Error Code
+        df_long['Duration'] = pd.to_numeric(df_long['Duration'], errors='coerce').fillna(0)
+        df_long = df_long[df_long['Duration'] > 0].copy()
+        
+        # Extract the Error Code from the column name (fXX -> XX)
+        df_long['Error'] = df_long['RawErrorColumn'].str.replace('f', '', regex=False).astype(str).str.strip()
+        
+        # 6. Aggregate by 'Error' (Sum durations for the same error code across all rows in the sheet)
+        aggregated_errors = df_long.groupby("Error")["Duration"].sum().reset_index()
+        
+        # Remove rows where the error code is not purely numeric 
+        aggregated_errors = aggregated_errors[aggregated_errors['Error'].str.isnumeric()].copy()
+        
+        # 7. Add Date and MachineType
+        aggregated_errors['Date'] = file_date_obj
+        aggregated_errors['MachineType'] = determine_machine_type(sheet_name_for_debug)
 
-    except IndexError as e:
-        st.error(
-            f"Error in file '{uploaded_file_name_for_debug}' (Sheet: '{selected_sheet_name}'): Raw error data not found in expected range (G12:H1000) of your Excel sheet. (Error: `{e}`). Please check the sheet format.")
-        return pd.DataFrame()
+        return aggregated_errors.dropna(subset=['Date'])
+    
     except Exception as e:
         st.error(
-            f"Error in file '{uploaded_file_name_for_debug}' (Sheet: '{selected_sheet_name}'): An unexpected error occurred while processing error data: `{e}`")
+            f"Error in file '{uploaded_file_name_for_debug}' (Sheet: '{sheet_name_for_debug}'): An unexpected error occurred while processing error data: `{e}`")
         return pd.DataFrame()
 
+# --- NEW CORE METRICS CALCULATION FUNCTION ---
+def calculate_metrics(prod_df: pd.DataFrame, err_df: pd.DataFrame, group_cols: list) -> pd.DataFrame:
+    """
+    Calculates Line Efficiency and OE based on the new 24-hour cycle logic, 
+    grouped by the specified columns (e.g., ['Date', 'Product'] or ['Date', 'ProductionTypeForTon']).
+    """
+    if prod_df.empty:
+        return pd.DataFrame()
+
+    # --- 1. Aggregate Production Data ---
+    # Need to handle case where 'Product' is not in group_cols (e.g., when grouping by Machine)
+    prod_group_cols = [col for col in group_cols if col in prod_df.columns]
+    
+    prod_agg = prod_df.groupby(prod_group_cols).agg(
+        Total_Target_Hour=('Target_Hour', 'sum'),
+        Total_Duration=('Duration', 'sum'),
+        Total_PackQty=('PackQty', 'sum')
+    ).reset_index()
+
+    if err_df.empty:
+        # If no error data, fall back to simple efficiency based on actual running time (Total_Duration)
+        prod_agg['NetProduction_H'] = prod_agg['Total_Duration']
+        prod_agg['Line_Efficiency(%)'] = np.where(
+            prod_agg['NetProduction_H'] > 0,
+            (prod_agg['Total_Target_Hour'] / prod_agg['NetProduction_H']) * 100,
+            0
+        )
+        prod_agg['OE(%)'] = prod_agg['Line_Efficiency(%)']
+        prod_agg['LegalStoppage_H'] = 0.0
+        prod_agg['IdleTime_H'] = 0.0
+        prod_agg['Downtime_H'] = 0.0
+        prod_agg['Losses_H'] = 0.0
+        prod_agg['OE_Adjust_H'] = 0.0
+        return prod_agg
+
+    # --- 2. Aggregate Error Data and Convert to Hours ---
+    err_group_cols = [col for col in group_cols if col in err_df.columns]
+
+    daily_err_agg = err_df.copy() 
+    daily_err_agg['Error'] = daily_err_agg['Error'].astype(str).str.strip()
+
+    # Helper function to sum duration (in minutes) for specific codes and convert to hours
+    def sum_duration_for_codes(df, codes):
+        codes_str = [str(c) for c in codes]
+        # Duration is in minutes (from read_error_data) -> convert to hours by dividing by 60
+        return df[df['Error'].isin(codes_str)]['Duration'].sum() / 60 
+
+    # Aggregate all error categories
+    err_summary = daily_err_agg.groupby(err_group_cols).apply(lambda x: pd.Series({
+        'LegalStoppage_H': sum_duration_for_codes(x, ['33']),
+        'IdleTime_H': sum_duration_for_codes(x, ['32']),
+        'Downtime_H': sum_duration_for_codes(x, [str(c) for c in range(21, 32)]), # 21 to 31
+        'Losses_H': sum_duration_for_codes(x, [str(c) for c in range(1, 21)]), # 1 to 20
+        'OE_Adjust_H': sum_duration_for_codes(x, ['24', '25']) 
+    })).reset_index()
+    
+    # --- 3. Merge Production and Error Data ---
+    # Merge on shared grouping columns (Date, and MachineType/Product if present in both)
+    daily_metrics = pd.merge(prod_agg, err_summary, on=err_group_cols, how='left').fillna(0)
+    
+    # --- 4. Define Time Variables (in Hours) ---
+    Total_Day_Hours = 24.0 # 6 morning to 6 morning next day is 24 hours
+    
+    # Gross Production Hour = 24 - Legal Stoppage - Idle Time
+    daily_metrics['GrossProduction_H'] = Total_Day_Hours - daily_metrics['LegalStoppage_H'] - daily_metrics['IdleTime_H']
+    
+    # Net Production Hour = Gross Production Hour - Downtime
+    # Downtime includes codes 21 to 31
+    daily_metrics['NetProduction_H'] = daily_metrics['GrossProduction_H'] - daily_metrics['Downtime_H']
+    
+    # --- 5. Calculate Line Efficiency and OE ---
+    
+    # Line Efficiency = Target Hour / Net Production Hour
+    daily_metrics['Line_Efficiency(%)'] = np.where(
+        daily_metrics['NetProduction_H'] > 0,
+        (daily_metrics['Total_Target_Hour'] / daily_metrics['NetProduction_H']) * 100,
+        0
+    )
+    
+    # OE = (Target Hour / (Net Production + code 24 and code 25)) * 100
+    daily_metrics['OE_Denominator'] = daily_metrics['NetProduction_H'] + daily_metrics['OE_Adjust_H']
+    daily_metrics['OE(%)'] = np.where(
+        daily_metrics['OE_Denominator'] > 0,
+        (daily_metrics['Total_Target_Hour'] / daily_metrics['OE_Denominator']) * 100,
+        0
+    )
+    
+    return daily_metrics
+
+# --- Main Application ---
 
 def clear_supabase_bucket():
     """
@@ -602,8 +722,6 @@ def clear_supabase_bucket():
     except Exception as e:
         st.error(f"Error deleting files from Supabase: {e}")
 
-
-# --- Main Application ---
 
 st.set_page_config(layout="wide", page_title="Production & Error Dashboard")
 st.title("📊 Production and Error Analysis Dashboard")
@@ -748,11 +866,10 @@ elif st.session_state.page == "Data Analyzing Dashboard":
         num_selected_days = (selected_end_date - selected_start_date).days + 1
         st.info(f"Number of days selected: **{num_selected_days}**")
 
-
         if not files_in_date_range:
             st.info(
                 "No files found within the selected date range. Please adjust your date selection or upload more files.")
-        else:  # This 'else' block is correctly matched with the 'if not files_in_date_range'
+        else:
             # Display the list of files that will be analyzed
             st.markdown("##### Files to be analyzed based on selected dates:")
             for f_info in files_in_date_range:
@@ -760,26 +877,25 @@ elif st.session_state.page == "Data Analyzing Dashboard":
 
             # We now use the filtered files from the date range directly.
             selected_files_full_paths_dashboard = [f['full_path'] for f in files_in_date_range]
-            
+
             # --- Processing files for analysis ---
             all_production_data = []
             all_error_data = []
-
             progress_text = "Processing files..."
             my_bar = st.progress(0, text=progress_text)
-
             for i, file_info_dict in enumerate(files_in_date_range): # Iterate through dicts for file_date
                 file_full_path = file_info_dict['full_path']
                 file_data = download_from_supabase(file_full_path)
+
                 if file_data:
                     try:
                         xls = pd.ExcelFile(BytesIO(file_data))
-
                         # Iterate through ALL sheets in the Excel file
                         for sheet_name in xls.sheet_names:
+                            # Read the sheet with no header to process headers manually later
                             df_raw_sheet = pd.read_excel(BytesIO(file_data), sheet_name=sheet_name, header=None)
+                            original_filename = file_full_path.split('/')[-1] # Extract original name from full path
 
-                            original_filename = file_full_path.split('/')[-1]  # Extract original name from full path
                             # Pass original_filename and file_date_obj to read_production_data and read_error_data
                             prod_df = read_production_data(df_raw_sheet, original_filename, sheet_name, file_info_dict['file_date'])
                             err_df = read_error_data(df_raw_sheet, sheet_name, original_filename, file_info_dict['file_date'])
@@ -788,13 +904,12 @@ elif st.session_state.page == "Data Analyzing Dashboard":
                                 all_production_data.append(prod_df)
                             if not err_df.empty:
                                 all_error_data.append(err_df)
-
                     except Exception as e:
                         # General error during file processing (e.g., corrupted Excel)
                         st.error(f"Error processing Excel file '{file_full_path}': {e}")
-
+                
                 my_bar.progress((i + 1) / len(files_in_date_range), text=f"Processing file: {file_full_path}")
-
+            
             my_bar.empty()
 
             final_prod_df = pd.concat(all_production_data, ignore_index=True) if all_production_data else pd.DataFrame()
@@ -803,35 +918,175 @@ elif st.session_state.page == "Data Analyzing Dashboard":
             # --- Machine Selection Filter ---
             unique_machines = ['All Machines']
             if not final_prod_df.empty and "ProductionTypeForTon" in final_prod_df.columns:
-                filtered_unique_machines = [m for m in final_prod_df["ProductionTypeForTon"].unique().tolist() if
-                                            m is not None]
+                filtered_unique_machines = [m for m in final_prod_df["ProductionTypeForTon"].unique().tolist() if m is not None]
                 if "Unknown Machine" in filtered_unique_machines:
                     filtered_unique_machines.remove("Unknown Machine")
                     filtered_unique_machines.append("Unknown Machine")
                 unique_machines.extend(sorted(filtered_unique_machines))
-
+            
+            # Select Machine for Filtering
             selected_machine = st.selectbox("Select Machine:", unique_machines)
 
             # Filter by machine first
             filtered_prod_df_by_machine = final_prod_df.copy()
             filtered_err_df_by_machine = final_err_df.copy()
-
+            
             if selected_machine != 'All Machines':
                 filtered_prod_df_by_machine = final_prod_df[
                     final_prod_df["ProductionTypeForTon"] == selected_machine].copy()
-                filtered_err_df_by_machine = final_err_df[filtered_err_df_by_machine["MachineType"] == selected_machine].copy()
+                filtered_err_df_by_machine = final_err_df[
+                    final_err_df["MachineType"] == selected_machine].copy()
 
             # --- ALL PRODUCTS WILL BE SHOWN BY DEFAULT ---
-            # No product multiselect in sidebar.
-            # filtered_prod_df_by_product now directly takes the machine-filtered data.
             filtered_prod_df_by_product = filtered_prod_df_by_machine.copy()
-
-            # Error data filtered only by machine, as product filter is removed.
-            filtered_err_df_by_product = filtered_err_df_by_machine.copy()
-
+            
             # chart_prod_df is now directly the filtered production data
             chart_prod_df = filtered_prod_df_by_product.copy()
 
+            
+            # =========================================================================
+            # --- NEW: Daily Efficiency and OE Calculations (Per Machine and Per Product) ---
+            # =========================================================================
+
+            if not filtered_prod_df_by_product.empty:
+                st.subheader("Daily Overall Equipment Effectiveness (OE) & Line Efficiency")
+
+                # 1. Calculate Daily Metrics by MACHINE (Grouping by Date and MachineType)
+                daily_machine_metrics = calculate_metrics(
+                    prod_df=filtered_prod_df_by_product.copy(),
+                    err_df=filtered_err_df_by_machine.copy(),
+                    group_cols=['Date', 'ProductionTypeForTon']
+                )
+
+                # --- Display Machine Metrics ---
+                st.markdown("#### Machine Efficiency & OE Summary")
+
+                # Display Overall Metrics for the entire period for the Machine
+                total_target_h_m = daily_machine_metrics['Total_Target_Hour'].sum()
+                total_net_prod_h_m = daily_machine_metrics['NetProduction_H'].sum()
+                total_oe_adjust_h_m = daily_machine_metrics['OE_Adjust_H'].sum()
+
+                overall_line_eff_m = (total_target_h_m / total_net_prod_h_m) * 100 if total_net_prod_h_m > 0 else 0
+                overall_oe_m = (total_target_h_m / (total_net_prod_h_m + total_oe_adjust_h_m)) * 100 if (total_net_prod_h_m + total_oe_adjust_h_m) > 0 else 0
+
+                col_eff_m, col_oe_m, col_time_m = st.columns(3)
+                with col_eff_m:
+                    st.metric(
+                        label=f"Overall Line Efficiency ({selected_machine})", 
+                        value=f"{overall_line_eff_m:.2f} %",
+                        help="Target Hour / Net Production Hour"
+                    )
+                with col_oe_m:
+                    st.metric(
+                        label=f"Overall OE ({selected_machine})", 
+                        value=f"{overall_oe_m:.2f} %",
+                        help="Target Hour / (Net Production Hour + Code 24 & 25 Hours)"
+                    )
+                with col_time_m:
+                    st.metric(
+                        label="Total Target Hours (Period)",
+                        value=f"{total_target_h_m:.2f} hrs",
+                        help="Sum of (PackQty / NominalSpeed) over all production rows"
+                    )
+
+                st.markdown("##### Daily Breakdown (Machine):")
+                display_cols_m = ['Date', 'ProductionTypeForTon', 'Line_Efficiency(%)', 'OE(%)', 'Total_Target_Hour', 'NetProduction_H', 'Downtime_H', 'Losses_H', 'IdleTime_H', 'LegalStoppage_H']
+                
+                # Filter columns based on availability after calculation
+                available_cols_m = [col for col in display_cols_m if col in daily_machine_metrics.columns]
+                
+                st.dataframe(
+                    daily_machine_metrics[available_cols_m].style.format({
+                        'Line_Efficiency(%)': "{:.2f} %",
+                        'OE(%)': "{:.2f} %",
+                        'Total_Target_Hour': "{:.2f}",
+                        'NetProduction_H': "{:.2f}",
+                        'Downtime_H': "{:.2f}",
+                        'Losses_H': "{:.2f}",
+                        'IdleTime_H': "{:.2f}",
+                        'LegalStoppage_H': "{:.2f}"
+                    }),
+                    use_container_width=True
+                )
+                
+                # Plotting the new trends (Line Efficiency and OE) - using Machine Metrics
+                st.markdown("#### Machine Efficiency & OE Trend (Daily)")
+
+                daily_metrics_melted_m = daily_machine_metrics.melt(
+                    id_vars=['Date'], 
+                    value_vars=['Line_Efficiency(%)', 'OE(%)'],
+                    var_name='Metric',
+                    value_name='Percentage'
+                )
+
+                fig_new_eff_m = px.line(
+                    daily_metrics_melted_m, 
+                    x="Date", 
+                    y="Percentage", 
+                    color="Metric",
+                    title=f"Daily Line Efficiency and OE Trend for Machine: {selected_machine}", 
+                    markers=True
+                )
+                st.plotly_chart(fig_new_eff_m, use_container_width=True)
+
+                st.markdown("---") 
+
+                # 2. Calculate Daily Metrics by PRODUCT (Grouping by Date and Product)
+                daily_product_metrics = calculate_metrics(
+                    prod_df=filtered_prod_df_by_product.copy(),
+                    err_df=filtered_err_df_by_machine.copy(), # Note: Error data is only available at Machine/Date level, so we merge it with Date/Product.
+                    group_cols=['Date', 'Product']
+                )
+
+                # --- Display Product Metrics ---
+                st.subheader(f"Daily Line Efficiency & OE per Product (Machine: {selected_machine})")
+
+                # Overall Metrics by Product (Aggregated over all dates in the period)
+                overall_product_metrics = daily_product_metrics.groupby('Product').agg(
+                    Total_Target_Hour=('Total_Target_Hour', 'sum'),
+                    Total_NetProduction_H=('NetProduction_H', 'sum'),
+                    Total_OE_Adjust_H=('OE_Adjust_H', 'sum')
+                ).reset_index()
+
+                overall_product_metrics['Line_Efficiency(%)'] = np.where(
+                    overall_product_metrics['Total_NetProduction_H'] > 0,
+                    (overall_product_metrics['Total_Target_Hour'] / overall_product_metrics['Total_NetProduction_H']) * 100,
+                    0
+                )
+                overall_product_metrics['OE(%)'] = np.where(
+                    (overall_product_metrics['Total_NetProduction_H'] + overall_product_metrics['Total_OE_Adjust_H']) > 0,
+                    (overall_product_metrics['Total_Target_Hour'] / (overall_product_metrics['Total_NetProduction_H'] + overall_product_metrics['Total_OE_Adjust_H'])) * 100,
+                    0
+                )
+
+                st.markdown("##### Overall Metrics by Product (Selected Period):")
+                display_cols_p_overall = ['Product', 'Line_Efficiency(%)', 'OE(%)', 'Total_Target_Hour', 'Total_NetProduction_H']
+                st.dataframe(
+                    overall_product_metrics[display_cols_p_overall].style.format({
+                        'Line_Efficiency(%)': "{:.2f} %",
+                        'OE(%)': "{:.2f} %",
+                        'Total_Target_Hour': "{:.2f}",
+                        'Total_NetProduction_H': "{:.2f}"
+                    }),
+                    use_container_width=True
+                )
+
+                st.markdown("##### Daily Breakdown by Product:")
+                display_cols_p_daily = ['Date', 'Product', 'Line_Efficiency(%)', 'OE(%)', 'Total_Target_Hour', 'NetProduction_H']
+
+                st.dataframe(
+                    daily_product_metrics[display_cols_p_daily].style.format({
+                        'Line_Efficiency(%)': "{:.2f} %",
+                        'OE(%)': "{:.2f} %",
+                        'Total_Target_Hour': "{:.2f}",
+                        'NetProduction_H': "{:.2f}"
+                    }),
+                    use_container_width=True
+                )
+                
+                st.markdown("---") 
+            # End of NEW OE/LE SECTION
+            
             # --- Conditional styling function for Efficiency(%) ---
             def highlight_efficiency(val):
                 color = ''
@@ -844,37 +1099,35 @@ elif st.session_state.page == "Data Analyzing Dashboard":
                     color = 'orange'  # Using orange for better visibility than yellow
                 return f'color: {color}'
 
-
             # --- Display Combined Production Data ---
-            st.subheader("Combined Production Data from Selected Files")
+            st.subheader("Combined Production Data from Selected Files (Row-Level Efficiency)")
             if not filtered_prod_df_by_product.empty:
                 # Apply conditional styling using the .style accessor
                 st.dataframe(
                     filtered_prod_df_by_product.style.applymap(
-                        highlight_efficiency, subset=['Efficiency(%)']
-                    ).format({"Efficiency(%)": "{:.2f} %"}),  # Format for display
+                        highlight_efficiency, 
+                        subset=['Efficiency(%)']
+                    ).format({"Efficiency(%)": "{:.2f} %"}), 
                     use_container_width=True
                 )
             else:
                 st.warning("No production data found for selected machine and date range. Please check your filters.")
-
-
+                
             # --- Charts Section ---
             if not chart_prod_df.empty:
                 st.subheader("Total Production (Tons) by Product")
                 total_ton_per_product = chart_prod_df.groupby("Product")["Ton"].sum().reset_index()
                 # Sort by Ton in descending order for better clarity (important for treemaps too)
                 total_ton_per_product = total_ton_per_product.sort_values(by="Ton", ascending=False)
-
                 # Changed to treemap
                 fig1 = px.treemap(total_ton_per_product, path=[px.Constant("All Products"), 'Product'], values="Ton",
-                                  title="Total Production (Tons) by Product",
-                                  hover_data=['Ton'],
-                                  color="Product") # Color by product for distinction
-                fig1.update_layout(margin=dict(t=50, l=25, r=25, b=25)) # Adjust margins for treemap
+                                  title="Total Production (Tons) by Product", hover_data=['Ton'], color="Product") 
+                # Color by product for distinction
+                fig1.update_layout(margin=dict(t=50, l=25, r=25, b=25))  # Adjust margins for treemap
                 st.plotly_chart(fig1, use_container_width=True)
 
-                st.subheader("Waste Percentage by Product") # Updated title
+                st.subheader("Waste Percentage by Product")
+                # Updated title
                 # Calculate aggregated waste percentage: (Sum of Waste / Sum of PackQty) * 100
                 agg_waste_percent_df = chart_prod_df.groupby("Product").agg(
                     TotalWaste=('Waste', 'sum'),
@@ -890,30 +1143,25 @@ elif st.session_state.page == "Data Analyzing Dashboard":
 
                 if not agg_waste_percent_df.empty:
                     # Changed to bar chart with Waste(%)
-                    fig2 = px.bar(agg_waste_percent_df, x="Product", y="Waste(%)",
-                                  title="Waste Percentage by Product",
-                                  labels={"Waste(%)": "Waste (%)"},
-                                  color="Product", # Assign distinct color to each product
-                                  color_discrete_sequence=px.colors.qualitative.Plotly, # Use qualitative color scale
+                    fig2 = px.bar(agg_waste_percent_df, x="Product", y="Waste(%)", title="Waste Percentage by Product",
+                                  labels={"Waste(%)": "Waste (%)"}, color="Product", 
+                                  color_discrete_sequence=px.colors.qualitative.Plotly,  # Use qualitative color scale
                                   text_auto=True)
                     fig2.update_traces(textfont_size=14, textfont_color='black', textfont_weight='bold')
                     st.plotly_chart(fig2, use_container_width=True)
                 else:
                     st.info("No data found to display waste percentage.")
 
-                st.subheader("Efficiency by Product")
-                chart_prod_df['PotentialProduction'] = chart_prod_df['Capacity'] * \
-                                                                     chart_prod_df['Duration']
-
+                st.subheader("Efficiency by Product (Original Formula)")
+                chart_prod_df['PotentialProduction'] = chart_prod_df['NominalSpeed'] * chart_prod_df['Duration']
                 agg_efficiency_df = chart_prod_df.groupby("Product").agg(
                     TotalPackQty=('PackQty', 'sum'),
                     TotalPotentialProduction=('PotentialProduction', 'sum')
                 ).reset_index()
-
                 agg_efficiency_df["Efficiency(%)"] = (
                     agg_efficiency_df.apply(
                         lambda row: (row["TotalPackQty"] / row["TotalPotentialProduction"] * 100) if row[
-                                                                                                         "TotalPotentialProduction"] > 0 else 0,
+                            "TotalPotentialProduction"] > 0 else 0,
                         axis=1
                     )
                 )
@@ -922,7 +1170,7 @@ elif st.session_state.page == "Data Analyzing Dashboard":
                 if not agg_efficiency_df.empty:
                     # Keeping this as a bar chart as efficiency is not typically tree-like
                     fig_efficiency = px.bar(agg_efficiency_df, x="Product", y="Efficiency(%)",
-                                            title="Average Efficiency by Product",
+                                            title="Average Efficiency by Product (Original Formula)",
                                             color="Efficiency(%)",
                                             color_continuous_scale=px.colors.sequential.Greens,
                                             text_auto=True)
@@ -933,26 +1181,17 @@ elif st.session_state.page == "Data Analyzing Dashboard":
             else:
                 st.warning("No production data available for charts after applying filters.")
 
-
             # --- Display Combined Error Data ---
-            st.subheader("Downtime / Errors from Selected Files")
-            if not filtered_err_df_by_product.empty:
-                err_sum = filtered_err_df_by_product.groupby("Error")["Duration"].sum().reset_index()
+            st.subheader("Downtime / Errors from Selected Files (Minutes)")
+            if not filtered_err_df_by_machine.empty:
+                err_sum = filtered_err_df_by_machine.groupby("Error")["Duration"].sum().reset_index()
                 err_sum = err_sum.sort_values(by="Duration", ascending=False)
-                
                 # Keeping this as a bar chart
                 fig3 = px.bar(err_sum, x="Error", y="Duration", title="Downtime by Error Type (Minutes)",
-                              labels={"Duration": "Duration (minutes)"},
-                              color="Error",
-                              color_discrete_sequence=px.colors.qualitative.Plotly,
-                              text_auto=True,
-                              height=600)
-                
+                              labels={"Duration": "Duration (minutes)"}, color="Error",
+                              color_discrete_sequence=px.colors.qualitative.Plotly, text_auto=True, height=600)
                 fig3.update_traces(textfont_size=14, textfont_color='black', textfont_weight='bold')
-                
-                fig3.update_layout(xaxis_tickangle=-45,
-                                  margin=dict(b=150))
-                
+                fig3.update_layout(xaxis_tickangle=-45, margin=dict(b=150))
                 st.plotly_chart(fig3, use_container_width=True)
 
                 csv = err_sum.to_csv(index=False).encode("utf-8")
@@ -963,285 +1202,12 @@ elif st.session_state.page == "Data Analyzing Dashboard":
                     mime="text/csv"
                 )
             else:
-                st.info(f"No error data found for selected machine and date range in the current view.")
+                st.info("No error data found for the selected machine and date range.")
 
 elif st.session_state.page == "Trend Analysis":
-    st.header("📈 Trend Analysis")
-    st.markdown("---")
-
-    all_files_info = get_all_supabase_files()
-
-    if not all_files_info:
-        st.warning("No files available for trend analysis. Please upload files first.")
-    else:
-        min_available_date = min(f['file_date'] for f in all_files_info)
-        max_available_date = max(f['file_date'] for f in all_files_info)
-
-        col_start_date_trend, col_end_date_trend = st.columns(2)
-        with col_start_date_trend:
-            selected_start_date_trend = st.date_input(
-                "Start Date for Trends:",
-                value=st.session_state.get('trend_start_date', min_available_date), # Use specific trend date state
-                min_value=min_available_date,
-                max_value=max_available_date,
-                key="trend_start_date_picker"
-            )
-        with col_end_date_trend:
-            selected_end_date_trend = st.date_input(
-                "End Date for Trends:",
-                value=st.session_state.get('trend_end_date', max_available_date), # Use specific trend date state
-                min_value=min_available_date,
-                max_value=max_available_date,
-                key="trend_end_date_picker"
-            )
-
-        # Update session state with selected dates
-        st.session_state.trend_start_date = selected_start_date_trend
-        st.session_state.trend_end_date = selected_end_date_trend
-
-        if selected_end_date_trend < selected_start_date_trend:
-            st.error("Error: End Date cannot be before Start Date. Please adjust.")
-            st.stop()
-
-        files_in_date_range_trend = [
-            f for f in all_files_info
-            if selected_start_date_trend <= f['file_date'] <= selected_end_date_trend
-        ]
-
-        if not files_in_date_range_trend:
-            st.info("No files found within the selected date range for trend analysis. Please adjust your date selection or upload more files.")
-        else:
-            trend_all_production_data = []
-            trend_all_error_data = []
-
-            my_bar_trend = st.progress(0, text="Processing files for trend analysis...")
-            for i, file_info_dict in enumerate(files_in_date_range_trend):
-                file_full_path = file_info_dict['full_path']
-                file_data = download_from_supabase(file_full_path)
-                if file_data:
-                    try:
-                        xls = pd.ExcelFile(BytesIO(file_data))
-                        for sheet_name in xls.sheet_names:
-                            df_raw_sheet = pd.read_excel(BytesIO(file_data), sheet_name=sheet_name, header=None)
-                            original_filename = file_full_path.split('/')[-1]
-
-                            prod_df_trend = read_production_data(df_raw_sheet, original_filename, sheet_name, file_info_dict['file_date'])
-                            err_df_trend = read_error_data(df_raw_sheet, sheet_name, original_filename, file_info_dict['file_date'])
-
-                            if not prod_df_trend.empty:
-                                trend_all_production_data.append(prod_df_trend)
-                            if not err_df_trend.empty:
-                                trend_all_error_data.append(err_df_trend)
-                    except Exception as e:
-                        st.error(f"Error processing Excel file '{file_info_dict['name']}' for trends: {e}")
-                my_bar_trend.progress((i + 1) / len(files_in_date_range_trend))
-            my_bar_trend.empty()
-
-            trend_final_prod_df = pd.concat(trend_all_production_data, ignore_index=True) if trend_all_production_data else pd.DataFrame()
-            trend_final_err_df = pd.concat(trend_all_error_data, ignore_index=True) if trend_all_error_data else pd.DataFrame()
-
-            # Convert 'Date' column to datetime objects for proper resampling
-            if not trend_final_prod_df.empty:
-                trend_final_prod_df['Date'] = pd.to_datetime(trend_final_prod_df['Date'])
-            if not trend_final_err_df.empty:
-                trend_final_err_df['Date'] = pd.to_datetime(trend_final_err_df['Date'])
-
-
-            # --- Trend Granularity Selection ---
-            st.subheader("Trend Aggregation Level")
-            granularity_options = {
-                "Daily": "D",
-                "Weekly": "W",
-                "Monthly": "M",
-                "Yearly": "Y"
-            }
-            selected_granularity_display = st.radio(
-                "Group trends by:",
-                options=list(granularity_options.keys()),
-                horizontal=True,
-                key="trend_granularity_radio"
-            )
-            selected_granularity_code = granularity_options[selected_granularity_display]
-
-            # --- Machine Selection Filter for Trends ---
-            trend_unique_machines = ['All Machines']
-            if not trend_final_prod_df.empty and "ProductionTypeForTon" in trend_final_prod_df.columns:
-                filtered_trend_unique_machines = [m for m in trend_final_prod_df["ProductionTypeForTon"].unique().tolist() if m is not None]
-                if "Unknown Machine" in filtered_trend_unique_machines:
-                    filtered_trend_unique_machines.remove("Unknown Machine")
-                    filtered_trend_unique_machines.append("Unknown Machine")
-                trend_unique_machines.extend(sorted(filtered_trend_unique_machines))
-
-            trend_selected_machine = st.selectbox("Select Machine for Trends:", trend_unique_machines, key="trend_machine_select")
-
-            trend_filtered_prod_df_by_machine = trend_final_prod_df.copy()
-            trend_filtered_err_df_by_machine = trend_final_err_df.copy()
-
-            if trend_selected_machine != 'All Machines':
-                trend_filtered_prod_df_by_machine = trend_final_prod_df[trend_final_prod_df["ProductionTypeForTon"] == trend_selected_machine].copy()
-                trend_filtered_err_df_by_machine = trend_final_err_df[trend_final_err_df["MachineType"] == trend_selected_machine].copy()
-
-            # --- Product Selection for Trends (Optional, for detailed product view) ---
-            # Get unique products based on filtered machine data
-            all_available_products_for_trend = ['All Products']
-            if not trend_filtered_prod_df_by_machine.empty:
-                valid_products = [p for p in trend_filtered_prod_df_by_machine['Product'].unique().tolist() if p]
-                all_available_products_for_trend.extend(sorted(valid_products))
-
-            trend_selected_products = st.multiselect(
-                "Select Specific Product(s) for Detailed Trend (Optional):",
-                options=all_available_products_for_trend,
-                default=['All Products'] # Default to all products
-            )
-
-            # Filter by selected products
-            if 'All Products' in trend_selected_products:
-                # If 'All Products' is selected, ignore other product selections and use all data
-                trend_filtered_prod_df_by_product = trend_filtered_prod_df_by_machine.copy()
-            else:
-                trend_filtered_prod_df_by_product = trend_filtered_prod_df_by_machine[
-                    trend_filtered_prod_df_by_machine['Product'].isin(trend_selected_products)
-                ].copy()
-
-            # Error data is still filtered only by machine
-            trend_filtered_err_df_final = trend_filtered_err_df_by_machine.copy()
-
-
-            # --- Plotting Production Trends ---
-            st.markdown("### Production Trends")
-            if not trend_filtered_prod_df_by_product.empty:
-                # Set 'Date' as index for resampling
-                prod_df_resampled = trend_filtered_prod_df_by_product.set_index('Date')
-
-                # Daily Total Production (Tons) - Resampled
-                daily_total_ton = prod_df_resampled.resample(selected_granularity_code)["Ton"].sum().reset_index()
-                # Filter out periods with 0 production (meaning no data for that period)
-                daily_total_ton = daily_total_ton[daily_total_ton['Ton'] > 0]
-                
-                if not daily_total_ton.empty:
-                    fig_daily_ton = px.line(daily_total_ton, x="Date", y="Ton",
-                                            title=f"{selected_granularity_display} Total Production (Tons) Trend", markers=True)
-                    st.plotly_chart(fig_daily_ton, use_container_width=True)
-                else:
-                    st.info(f"No total production data to display for the selected filters and {selected_granularity_display} granularity.")
-
-                # Daily Production (Tons) by Product - Resampled (only if specific products are chosen or if "All Products" is chosen and there aren't too many products)
-                if 'All Products' in trend_selected_products or len(trend_selected_products) < 10: # Heuristic to prevent too many lines
-                    daily_product_ton = prod_df_resampled.groupby([pd.Grouper(freq=selected_granularity_code), "Product"])["Ton"].sum().reset_index()
-                    # Filter out periods with 0 production (meaning no data for that period for a given product)
-                    daily_product_ton = daily_product_ton[daily_product_ton['Ton'] > 0]
-
-                    if not daily_product_ton.empty:
-                        fig_daily_product_ton = px.line(daily_product_ton, x="Date", y="Ton", color="Product",
-                                                        title=f"{selected_granularity_display} Production (Tons) Trend by Product", markers=True)
-                        st.plotly_chart(fig_daily_product_ton, use_container_width=True)
-                    else:
-                        st.info(f"No production data by product to display for the selected filters and {selected_granularity_display} granularity.")
-                else:
-                    st.info(f"Select fewer products for a readable {selected_granularity_display} trend by product, or select 'All Products'.")
-
-
-                # Daily Efficiency Trend - Resampled
-                daily_efficiency_data = prod_df_resampled.groupby(pd.Grouper(freq=selected_granularity_code)).agg(
-                    TotalPackQty=('PackQty', 'sum'),
-                    TotalPotentialProduction=('PotentialProduction', 'sum')
-                ).reset_index()
-                daily_efficiency_data["Efficiency(%)"] = np.where(
-                    daily_efficiency_data['TotalPotentialProduction'] > 0,
-                    (daily_efficiency_data['TotalPackQty'] / daily_efficiency_data['TotalPotentialProduction']) * 100,
-                    0
-                )
-                # Filter out periods with 0 efficiency (meaning no production data for that period)
-                daily_efficiency_data = daily_efficiency_data[daily_efficiency_data['TotalPackQty'] > 0] # Filter by total pack qty > 0
-
-                if not daily_efficiency_data.empty:
-                    fig_daily_efficiency = px.line(daily_efficiency_data, x="Date", y="Efficiency(%)",
-                                                   title=f"{selected_granularity_display} Average Efficiency (%) Trend", markers=True)
-                    st.plotly_chart(fig_daily_efficiency, use_container_width=True)
-                else:
-                    st.info(f"No efficiency data to display for the selected filters and {selected_granularity_display} granularity.")
-
-                # Daily Waste Trend - Resampled
-                daily_waste_data = prod_df_resampled.groupby(pd.Grouper(freq=selected_granularity_code)).agg(
-                    TotalWaste=('Waste', 'sum'),
-                    TotalPackQty=('PackQty', 'sum')
-                ).reset_index()
-                daily_waste_data["Waste(%)"] = np.where(
-                    daily_waste_data['TotalPackQty'] > 0,
-                    (daily_waste_data['TotalWaste'] / daily_waste_data['TotalPackQty']) * 100,
-                    0
-                )
-                # Filter out periods with 0 total pack qty (meaning no production data to calculate waste %)
-                daily_waste_data = daily_waste_data[daily_waste_data['TotalPackQty'] > 0]
-
-                if not daily_waste_data.empty:
-                    fig_daily_waste = px.line(daily_waste_data, x="Date", y="Waste(%)",
-                                              title=f"{selected_granularity_display} Average Waste (%) Trend", markers=True)
-                    st.plotly_chart(fig_daily_waste, use_container_width=True)
-                else:
-                    st.info(f"No waste data to display for the selected filters and {selected_granularity_display} granularity.")
-
-            else:
-                st.info("No production data available for trend analysis after applying filters.")
-
-            # --- Plotting Downtime Trends ---
-            st.markdown("### Downtime / Error Trends")
-            if not trend_filtered_err_df_final.empty:
-                # Set 'Date' as index for resampling
-                err_df_resampled = trend_filtered_err_df_final.set_index('Date')
-
-                # Daily Total Downtime
-                total_downtime = err_df_resampled.resample(selected_granularity_code)["Duration"].sum().reset_index()
-                # Filter out periods with 0 downtime (meaning no errors for that period)
-                total_downtime = total_downtime[total_downtime['Duration'] > 0]
-
-                if not total_downtime.empty:
-                    fig_total_downtime = px.line(total_downtime, x="Date", y="Duration",
-                                                 title=f"{selected_granularity_display} Total Downtime (Minutes) Trend", markers=True)
-                    st.plotly_chart(fig_total_downtime, use_container_width=True)
-                else:
-                    st.info(f"No total downtime data to display for the selected filters and {selected_granularity_display} granularity.")
-
-
-                # Daily Downtime by Error Type - Resampled (only if specific errors are chosen or not too many error types)
-                all_available_errors_for_trend = ['All Errors']
-                if not trend_filtered_err_df_final.empty:
-                    valid_errors = [e for e in trend_filtered_err_df_final['Error'].unique().tolist() if e]
-                    all_available_errors_for_trend.extend(sorted(valid_errors))
-
-                trend_selected_errors = st.multiselect(
-                    "Select Specific Error Type(s) for Detailed Trend (Optional):",
-                    options=all_available_errors_for_trend,
-                    default=['All Errors'] # Default to all errors
-                )
-
-                if 'All Errors' in trend_selected_errors:
-                    err_by_type_resampled = err_df_resampled.groupby([pd.Grouper(freq=selected_granularity_code), "Error"])["Duration"].sum().reset_index()
-                    # Filter out periods with 0 duration for specific error types
-                    err_by_type_resampled = err_by_type_resampled[err_by_type_resampled['Duration'] > 0]
-
-                    if len(err_by_type_resampled['Error'].unique()) > 10: # Heuristic for too many lines
-                        st.info(f"Too many error types to display a readable {selected_granularity_display} trend by error type. Please select specific error types above.")
-                    elif not err_by_type_resampled.empty:
-                        fig_daily_error_type = px.line(err_by_type_resampled, x="Date", y="Duration", color="Error",
-                                                       title=f"{selected_granularity_display} Downtime (Minutes) Trend by Error Type", markers=True)
-                        st.plotly_chart(fig_daily_error_type, use_container_width=True)
-                    else:
-                        st.info(f"No downtime data by error type to display for the selected filters and {selected_granularity_display} granularity.")
-                else:
-                    err_by_type_resampled_filtered = err_df_resampled[err_df_resampled['Error'].isin(trend_selected_errors)].groupby([pd.Grouper(freq=selected_granularity_code), "Error"])["Duration"].sum().reset_index()
-                    # Filter out periods with 0 duration for specific error types
-                    err_by_type_resampled_filtered = err_by_type_resampled_filtered[err_by_type_resampled_filtered['Duration'] > 0]
-
-                    if not err_by_type_resampled_filtered.empty:
-                        fig_daily_error_type_filtered = px.line(err_by_type_resampled_filtered, x="Date", y="Duration", color="Error",
-                                                                title=f"{selected_granularity_display} Downtime (Minutes) Trend for Selected Error Types", markers=True)
-                        st.plotly_chart(fig_daily_error_type_filtered, use_container_width=True)
-                    else:
-                        st.info("No data for selected error types in the chosen date range and granularity.")
-
-            else:
-                st.info("No error data available for trend analysis after applying filters.")
+    st.header("Trend Analysis")
+    st.markdown(
+        "This section is currently under development. Please use the **Data Analyzing Dashboard** for trend charts.")
 
 elif st.session_state.page == "Contact Me":
     st.subheader("Connect with Mohammad Asadollahzadeh")
@@ -1249,20 +1215,19 @@ elif st.session_state.page == "Contact Me":
     st.markdown("""
     In today’s cutting-edge world, with rapid advances in technology, AI is no longer optional—it’s essential. Using AI can significantly boost performance, minimize human error, and streamline workflows. Relying solely on traditional methods often results in wasted time and effort, without delivering the efficiency we seek.
 
-To address this, I’ve started building a platform that blends automation with intelligence. Driven by my passion for Python—despite still learning—and a deep interest in creating disciplined, data-driven technical solutions, I began developing this Streamlit-based website to analyze daily production performance.
+    To address this, I’ve started building a platform that blends automation with intelligence. Driven by my passion for Python—despite still learning—and a deep interest in creating disciplined, data-driven technical solutions, I began developing this Streamlit-based website to analyze daily production performance.
 
-While my Python skills are still growing, I’ve poured in patience, dedication, and curiosity. Throughout the process, tools like Gemini AI were instrumental in helping me debug, refine strategies, and bring this idea to life. Frankly, without AI assistance, reaching this point would have been far more difficult.
+    While my Python skills are still growing, I’ve poured in patience, dedication, and curiosity. Throughout the process, tools like Gemini AI were instrumental in helping me debug, refine strategies, and bring this idea to life. Frankly, without AI assistance, reaching this point would have been far more difficult.
 
-That said, I’m committed to improving—both in coding and system design. I welcome your feedback, suggestions, or any guidance to help enhance this platform further.
+    That said, I’m committed to improving—both in coding and system design. I welcome your feedback, suggestions, or any guidance to help enhance this platform further.
 
-📧 Email: m.asdz@yahoo.com
-🔗 LinkedIn: Mohammad Asdollahzadeh
+    📧 Email: m.asdz@yahoo.com
+    🔗 LinkedIn: Mohammad Asdollahzadeh
 
-Thank you for visiting, and I truly appreciate your support.
+    Thank you for visiting, and I truly appreciate your support.
 
-Warm regards,
-Mohammad Asdollahzadeh
+    Warm regards,
+    Mohammad Asdollahzadeh
 
 
-   
     """)
