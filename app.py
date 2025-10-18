@@ -39,7 +39,6 @@ def get_supabase_client():
         return supabase
     except Exception as e:
         st.error(f"خطا در اتصال به پایگاه داده Supabase: {e}")
-        # در صورت عدم اتصال در هنگام راه اندازی، برنامه متوقف می‌شود.
         st.stop() 
 
 supabase = get_supabase_client()
@@ -50,7 +49,6 @@ supabase = get_supabase_client()
 
 # 🔑 واژه‌نامه برای نقشه‌برداری ستون‌های فارسی اکسل به نام‌های استاندارد انگلیسی (ضروری برای OEE)
 COLUMN_MAP = {
-    # برای داده‌های Production 
     'مقدار کل': 'PackQty', 
     'بسته': 'PackQty',
     'ضایعات': 'Waste',
@@ -58,7 +56,6 @@ COLUMN_MAP = {
     'زمان فعالیت': 'Duration',
     'ظرفیت': 'Capacity',
     'تعداد نفرات': 'Manpower',
-    # برای داده‌های Error 
     'مدت زمان': 'Duration', 
 }
 
@@ -74,13 +71,11 @@ def parse_filename_date_to_datetime(filename):
 
 def standardize_dataframe_for_oee(df, type='prod'):
     """استانداردسازی نام ستون‌ها و تبدیل به انواع داده‌ای مورد نیاز."""
-    # استانداردسازی با نگاشت فارسی به انگلیسی
     df_standard = df.rename(columns=lambda x: COLUMN_MAP.get(x.strip(), x.strip())).copy()
     
     required_cols_prod = ['PackQty', 'Waste', 'Duration', 'Capacity', 'Ton']
     required_cols_error = ['Duration']
     
-    # تبدیل انواع داده
     if type == 'prod':
         for col in required_cols_prod:
             if col in df_standard.columns:
@@ -163,20 +158,30 @@ def upload_to_supabase(uploaded_files, bucket_name="production-archive"):
 def load_data_from_supabase_tables(table_name):
     """بارگذاری داده‌ها از جداول Supabase با رفع مشکل Case Sensitivity."""
     try:
-        # 🚨 Fix: PostgreSQL uses lowercase 'date' by default.
-        response = supabase.table(table_name).select("*").order("date", desc=False).execute()
+        # 🚨 FIX 1: Removed .order("date") to prevent the 'column does not exist' error.
+        response = supabase.table(table_name).select("*").execute()
         data = response.data
         if not data:
             return pd.DataFrame()
         
         df = pd.DataFrame(data)
         
-        # 🚨 Fix: Convert the lowercase column name 'date' to 'Date' for internal consistency
+        # 🚨 FIX 2: Check for both 'date' (lowercase) and 'Date' (uppercase) and standardize to 'Date' (Python use)
+        date_col_in_db = None
         if 'date' in df.columns:
-            df['Date'] = pd.to_datetime(df['date']).dt.date
-            df.drop(columns=['date'], inplace=True) 
+            date_col_in_db = 'date'
         elif 'Date' in df.columns: 
-            df['Date'] = pd.to_datetime(df['Date']).dt.date
+            date_col_in_db = 'Date'
+            
+        if date_col_in_db:
+            df['Date'] = pd.to_datetime(df[date_col_in_db]).dt.date
+            # Clean up the original column if it was lowercase
+            if date_col_in_db == 'date': 
+                df.drop(columns=['date'], inplace=True, errors='ignore')
+            
+        # Re-sort the DataFrame by the standardized 'Date' column in Python
+        if 'Date' in df.columns:
+            df = df.sort_values(by='Date', ascending=True).reset_index(drop=True)
 
         # اطمینان از تبدیل ستون‌ها به اعداد
         for col in ['Duration', 'PackQty', 'Waste', 'Ton', 'Capacity', 'Manpower']:
@@ -188,15 +193,14 @@ def load_data_from_supabase_tables(table_name):
         return df
 
     except Exception as e:
-        # در صورت بروز خطا در زمان بارگذاری، به صورت موقت خالی برمی‌گرداند.
         return pd.DataFrame()
 
 def insert_to_db(df, table_name):
-    """درج DataFrame به جدول Supabase با رعایت Case Sensitivity."""
+    """درج DataFrame به جدول Supabase."""
     if df.empty:
         return True
     
-    # 🚨 Fix: Convert all column names to lowercase for PostgreSQL insertion
+    # Column names are converted to lowercase for insertion (safer for PostgreSQL)
     df_insert = df.copy()
     df_insert.columns = [col.lower() for col in df_insert.columns]
     
@@ -281,7 +285,6 @@ def process_and_insert_data(uploaded_files, sheet_name_to_process):
             prod_df = read_production_data(df_raw_sheet, original_filename, sheet_name_to_process, file_date_obj)
             err_df = read_error_data(df_raw_sheet, sheet_name_to_process, original_filename, file_date_obj)
 
-            # Insert Production Data
             if not prod_df.empty and 'PackQty' in prod_df.columns:
                 prod_success = insert_to_db(prod_df, PROD_TABLE)
                 if prod_success:
@@ -292,7 +295,6 @@ def process_and_insert_data(uploaded_files, sheet_name_to_process):
             else:
                 status.write(f"⚠️ فایل **{original_filename}** حاوی داده‌های تولید معتبر نبود یا خالی بود.")
 
-            # Insert Error Data
             if not err_df.empty and 'Duration' in err_df.columns:
                 err_success = insert_to_db(err_df, ERROR_TABLE)
                 if err_success:
@@ -313,7 +315,6 @@ def process_and_insert_data(uploaded_files, sheet_name_to_process):
         except Exception as e:
             status.write(f"❌ خطای نامشخص هنگام پردازش فایل **'{original_filename}'**: {e}")
 
-    # Final status update
     if success_count == total_files:
         status.update(label="✅ تمام فایل‌ها با موفقیت پردازش و آپلود شدند!", state="complete", expanded=False)
     else:
@@ -384,8 +385,8 @@ elif st.session_state.page == "Data Archive":
     if delete_button_clicked:
         if delete_password == ARCHIVE_DELETE_PASSWORD:
             try:
-                # Command to delete all rows
-                supabase.table(table_to_delete).delete().neq('date', '1900-01-01').execute() 
+                # 🚨 FIX 3: Removed column name dependency for deletion - safe operation
+                supabase.table(table_to_delete).delete().neq('id', '0').execute() 
                 st.cache_data.clear() 
                 st.success(f"✅ تمام داده‌های جدول **{table_to_delete}** با موفقیت حذف شدند.")
                 st.rerun()
@@ -398,16 +399,20 @@ elif st.session_state.page == "Data Archive":
 elif st.session_state.page == "Data Analyzing Dashboard":
     st.header("📈 داشبورد تحلیل OEE و تولید")
     
-    # 🚨 New: Connection Status Check
+    # --- Connection Status Check ---
     try:
-        # Simple test query to ensure the connection is active and not just cached
-        supabase.table(PROD_TABLE).select("date").limit(1).execute() 
-        st.success("✅ اتصال به Supabase برقرار است.")
+        prod_count_response = supabase.table(PROD_TABLE).select("count()", count='exact').execute() 
+        err_count_response = supabase.table(ERROR_TABLE).select("count()", count='exact').execute() 
+        
+        prod_count = prod_count_response.count
+        err_count = err_count_response.count
+        
+        st.success(f"✅ اتصال به Supabase برقرار است. (داده‌های تولید: {prod_count} سطر، داده‌های خطا: {err_count} سطر)")
     except Exception as e:
-        st.error(f"❌ خطای حیاتی: اتصال به Supabase قطع است یا کلید منقضی شده است. لطفا وضعیت پایگاه داده را بررسی کنید. (جزئیات خطا: {e})")
+        st.error(f"❌ خطای حیاتی: اتصال به Supabase قطع است. لطفاً وضعیت API Key و جداول را بررسی کنید. (جزئیات خطا: {e})")
         st.stop()
     st.markdown("---")
-    # 🚨 End New Section
+    # --- End Connection Check ---
 
     df_prod_all = load_data_from_supabase_tables(PROD_TABLE)
     df_err_all = load_data_from_supabase_tables(ERROR_TABLE)
@@ -493,7 +498,6 @@ elif st.session_state.page == "Data Analyzing Dashboard":
         
         fig_oee = go.Figure()
         
-        # OEE
         fig_oee.add_trace(go.Indicator(
             mode="gauge+number",
             value=oee_pct,
@@ -505,7 +509,6 @@ elif st.session_state.page == "Data Analyzing Dashboard":
             domain={'row': 0, 'column': 0}
         ))
         
-        # Availability, Performance, Quality
         components = [("Availability", availability_pct, "#2A8C8C", 85, 0, 1), 
                       ("Performance", performance_pct, "#00AEEF", 85, 1, 0),
                       ("Quality", quality_pct, "#2ECC71", 95, 1, 1)]
