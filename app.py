@@ -2,14 +2,13 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from supabase import create_client, Client
-from datetime import datetime, time as datetime_time
-from io import BytesIO
+from datetime import datetime
 import re
 import numpy as np
 
 # ==============================================================================
 # 0. تنظیمات و متغیرهای سراسری (Configuration & Global Variables)
-#    **کلیدها مستقیماً در کد قرار داده شده‌اند (Hardcoded) برای رفع مشکل Secrets**
+#    **کلید Service Role و URL شما مستقیماً اینجا تعریف شده‌اند**
 # ==============================================================================
 
 st.set_page_config(
@@ -19,11 +18,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- Supabase Configuration (Hardcoded) ---
-# این مقادیر از فایل اصلی شما گرفته شده‌اند
-SUPABASE_URL = "https://rlutsxvghmhrgcnqbmch.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdXRzeHZnaG1ocmdjbnFibWNoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDUxMjg5OTEsImV4cCI6MjA2MDcwNDk5MX0.hM-WA6setQ_PZ13rOBEoy2a3rn7wQ6wLFMV9SyBWfHE"
-ARCHIVE_DELETE_PASSWORD = "beautifulmind"
+# --- Supabase Configuration (مقادیر نهایی و معتبر شما) ---
+SUPABASE_URL = "https://rlutsxvghmhrgcnqbmch.supabase.co" 
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdXRzeHZnaG1ocmdjbnFibWNoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NTEyODk5MSwiZXhwIjoyMDYwNzA0OTkxfQ.VPxJbrPUw4E-MyRGklQMcxveUTznNlWLhPO-mqrHv9c"
+
+ARCHIVE_DELETE_PASSWORD = "beautifulmind" # رمز عبور حذف آرشیو شما
 
 @st.cache_resource
 def get_supabase_client():
@@ -32,7 +31,7 @@ def get_supabase_client():
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
         return supabase
     except Exception as e:
-        # اگر خطای PGRST106 همچنان وجود دارد، خطا در اینجا نمایش داده می‌شود
+        # اگر خطا ۴۰۱ یا PGRST106 اینجا نمایش داده شود، مشکل از تنظیمات Supabase است نه کد
         st.error(f"خطا در اتصال به پایگاه داده Supabase: {e}")
         st.stop()
 
@@ -44,20 +43,17 @@ supabase = get_supabase_client()
 
 def standardize_columns(df):
     """
-    استانداردسازی نام ستون‌ها: حذف فاصله‌ها، تبدیل به Title Case و حذف کاراکترهای خاص.
-    این تابع مشکل احتمالی 'KeyError' را حل می‌کند.
+    استانداردسازی نام ستون‌ها (حل مشکل KeyError): حذف فاصله‌ها، تبدیل به Title Case.
     """
     new_columns = {}
     for col in df.columns:
-        # حذف کاراکترهای غیر الفبایی-عددی به جز فاصله
         cleaned_col = re.sub(r'[^\w\s-]', '', str(col)).strip()
-        # حذف فاصله‌های اضافی و تبدیل به Title Case برای استانداردسازی
         standard_col = cleaned_col.replace(' ', '').title()
         new_columns[col] = standard_col
     return df.rename(columns=new_columns)
 
 def parse_filename_date_to_datetime(filename):
-    """استخراج تاریخ از نام فایل و تبدیل به آبجکت datetime."""
+    """استخراج تاریخ از نام فایل."""
     match = re.search(r'(\d{8})', filename)
     if match:
         try:
@@ -77,11 +73,9 @@ def load_data_from_supabase(table_name="production_data"):
             if df.empty:
                 return df
                 
-            # تبدیل تاریخ‌های استخراج شده از Supabase به فرمت datetime
             if 'Date' in df.columns:
                 df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date
             
-            # استانداردسازی ستون‌ها برای جلوگیری از KeyError در فیلترها
             return standardize_columns(df) 
         except Exception as e:
             st.error(f"خطا در بارگذاری داده‌ها از Supabase: {e}")
@@ -92,65 +86,47 @@ def load_data_from_supabase(table_name="production_data"):
 def process_uploaded_excel(uploaded_file, selected_sheet_name):
     """
     پردازش فایل اکسل آپلود شده و استخراج داده‌های Production و Error.
-    این تابع، خطاهای Syntax و Indentation را به درستی مدیریت می‌کند.
     """
     try:
         df_raw_sheet = pd.read_excel(uploaded_file, sheet_name=selected_sheet_name, header=None)
         
-        # --- استخراج داده‌های Production ---
-        # محدوده داده‌های تولید (بر اساس کدهای قدیمی شما)
+        # --- استخراج داده‌های Production (بازه D4:P9) ---
         data_prod = df_raw_sheet.iloc[3:9, 3:16].copy()
-        
-        # استخراج هدرها و تنظیم نام ستون
         headers_prod = df_raw_sheet.iloc[2, 3:16].tolist()
         data_prod.columns = headers_prod
-        
-        # تمیزکاری داده‌ها
         df_prod = data_prod.melt(ignore_index=False, var_name='ProductionTypeForTon', value_name='ProductionValue').dropna(subset=['ProductionValue'])
         
         
-        # --- استخراج داده‌های Error ---
-        # محدوده داده‌های خطا (بر اساس کدهای قدیمی شما)
+        # --- استخراج داده‌های Error (بازه D13:P15) ---
         data_err = df_raw_sheet.iloc[12:15, 3:16].copy()
-        
-        # استخراج هدرها و تنظیم نام ستون
         headers_err = df_raw_sheet.iloc[11, 3:16].tolist()
         data_err.columns = headers_err
-        
-        # تمیزکاری داده‌ها
         df_err = data_err.melt(ignore_index=False, var_name='MachineType', value_name='ErrorDuration').dropna(subset=['ErrorDuration'])
 
 
         # --- ترکیب داده‌ها و اطلاعات اولیه ---
-        
         filename = uploaded_file.name
         file_date = parse_filename_date_to_datetime(filename)
         shift = df_raw_sheet.iloc[1, 1].strip() if not pd.isna(df_raw_sheet.iloc[1, 1]) else 'Unknown'
         
-        # اضافه کردن ستون‌های Metadata
+        # اضافه کردن ستون‌های Metadata و استانداردسازی
         df_prod['Date'] = file_date
         df_prod['Shift'] = shift
         df_prod['Filename'] = filename
-        df_prod = df_prod.reset_index(drop=True)
+        df_prod = standardize_columns(df_prod).reset_index(drop=True)
 
         df_err['Date'] = file_date
         df_err['Shift'] = shift
         df_err['Filename'] = filename
-        df_err = df_err.reset_index(drop=True)
-
-        # استانداردسازی نهایی
-        df_prod = standardize_columns(df_prod)
-        df_err = standardize_columns(df_err)
+        df_err = standardize_columns(df_err).reset_index(drop=True)
 
         return df_prod, df_err
 
     except Exception as e:
-        # استفاده از Triple Quotes برای رفع خطای SyntaxError قبلی
         st.error(
             f"""
             ❌ خطا در پردازش فایل اکسل '{uploaded_file.name}' (شیت: {selected_sheet_name}):
             ساختار شیت اکسل مطابقت ندارد. (جزئیات خطا: {e})
-            لطفاً مطمئن شوید هدرها و محدوده داده‌ها در جای صحیح قرار دارند.
             """
         )
         return pd.DataFrame(), pd.DataFrame()
@@ -162,8 +138,7 @@ def upload_to_supabase(df, table_name):
         st.warning("داده‌ای برای آپلود وجود ندارد.")
         return False
         
-    df_upload = df.copy()
-    records = df_upload.to_dict('records')
+    records = df.to_dict('records')
     try:
         supabase.table(table_name).insert(records).execute()
         return True
@@ -182,7 +157,6 @@ with st.sidebar:
     st.title("منوی مدیریت داده")
     st.markdown("---")
     
-    # مدیریت صفحات
     if 'page' not in st.session_state:
         st.session_state.page = "Upload"
         
@@ -194,11 +168,18 @@ with st.sidebar:
         st.session_state.page = "Archive"
 
     st.markdown("---")
-    st.markdown("Developed by M. Asadollahzadeh")
-    st.markdown("📧 Email: m.asdz@yahoo.com")
-    # افزودن توضیحات شما از فایل test.txt به صورت یک بخش کوچک در سایدبار
-    with st.expander("درباره پلتفرم"):
-         st.caption("این پلتفرم با تمرکز بر ترکیب اتوماسیون و هوش داده‌محور توسعه یافته است. از حمایت و بازخوردهای شما استقبال می‌کنم.")
+    # توضیحات شما از فایل test.txt در یک Expander زیبا
+    with st.expander("درباره پلتفرم و توسعه‌دهنده", expanded=False):
+        st.markdown(
+            """
+            در دنیای پیشرفته امروز، هوش مصنوعی دیگر یک گزینه نیست، بلکه یک ضرورت است. 
+            من برای تحلیل عملکرد تولید روزانه، با علاقه به پایتون، این پلتفرم مبتنی بر Streamlit را توسعه دادم.
+            اگرچه مهارت‌های کدنویسی من در حال رشد است، اما با تعهد و کنجکاوی کار می‌کنم. 
+            از حمایت و بازخوردهای شما برای بهبود این پلتفرم استقبال می‌کنم.
+            
+            📧 **ایمیل:** m.asdz@yahoo.com
+            """
+        )
 
 
 # ==============================================================================
@@ -207,6 +188,7 @@ with st.sidebar:
 
 if st.session_state.page == "Upload":
     st.header("⬆️ بارگذاری و پردازش داده‌های تولیدی")
+    st.info("لطفاً فایل‌های اکسل را با فرمت **ddmmyyyy** در نام فایل بارگذاری کنید.")
     st.markdown("---")
     
     col1, col2 = st.columns([1, 2])
@@ -222,7 +204,6 @@ if st.session_state.page == "Upload":
 
     if upload_button and uploaded_files:
         st.subheader("نتایج پردازش")
-        
         st.cache_data.clear() 
 
         total_files = len(uploaded_files)
@@ -263,8 +244,8 @@ elif st.session_state.page == "Analysis":
     if df_all.empty:
         st.info("داده‌ای برای تحلیل وجود ندارد. لطفاً ابتدا فایل‌ها را بارگذاری کنید.")
     else:
-        
-        if 'Productiontypeforton' in df_all.columns and 'Date' in df_all.columns:
+        # نام ستون پس از استانداردسازی Productiontypeforton است
+        if 'Productiontypeforton' in df_all.columns and 'Date' in df_all.columns: 
             
             # فیلترها
             col_filt1, col_filt2, col_filt3 = st.columns(3)
@@ -290,7 +271,6 @@ elif st.session_state.page == "Analysis":
             ]
             
             if selected_product != 'All':
-                # **توجه: نام ستون Productiontypeforton پس از استانداردسازی استفاده شده است.**
                 df_filtered = df_filtered[df_filtered['Productiontypeforton'] == selected_product]
 
             st.markdown("### نمودار تحلیل عملکرد")
@@ -338,8 +318,6 @@ elif st.session_state.page == "Archive":
     if st.button(f"🔥 حذف تمام داده‌های جدول '{table_to_delete}'", type="danger", use_container_width=True):
         if delete_password == ARCHIVE_DELETE_PASSWORD:
             try:
-                # دستور حذف تمام سطرها
-                # از neq('id', '0') استفاده می‌شود تا از RLS های احتمالی Supabase عبور کند
                 supabase.table(table_to_delete).delete().neq('id', '0').execute() 
                 st.cache_data.clear() 
                 st.success(f"✅ تمام داده‌های جدول **{table_to_delete}** با موفقیت حذف شدند.")
