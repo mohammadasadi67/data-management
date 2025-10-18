@@ -8,7 +8,6 @@ import base64
 from datetime import datetime, timedelta
 import re
 import numpy as np
-import logging
 import time
 
 # تنظیمات اصلی برنامه
@@ -26,7 +25,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 # --- DB Table Names ---
 PROD_TABLE = "production_data"
 ERROR_TABLE = "error_data"
-
+ARCHIVE_BUCKET = "production-archive" # نام باکت Storage
 # --- Password for Archive Deletion ---
 ARCHIVE_DELETE_PASSWORD = "beautifulmind"
 
@@ -38,13 +37,13 @@ def get_supabase_client():
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
         return supabase
     except Exception as e:
-        st.error(f"خطا در اتصال به پایگاه داده Supabase: {e}")
+        st.error(f"❌ خطا در اتصال به پایگاه داده Supabase: {e}")
         st.stop() 
 
 supabase = get_supabase_client()
 
 # ------------------------------------------------------------------------------
-# --- ۲. توابع کمکی اصلی و محاسبات (بدون تغییر منطق) ---
+# --- ۲. توابع کمکی اصلی و محاسبات ---
 # ------------------------------------------------------------------------------
 
 COLUMN_MAP = {
@@ -57,6 +56,8 @@ COLUMN_MAP = {
     'تعداد نفرات': 'Manpower',
     'مدت زمان': 'Duration', 
 }
+
+# (توابع parse_filename_date_to_datetime، standardize_dataframe_for_oee، read_production_data، read_error_data بدون تغییر در منطق)
 
 def parse_filename_date_to_datetime(filename):
     match = re.search(r'(\d{8})', filename)
@@ -137,11 +138,13 @@ def read_error_data(df_raw_sheet, sheet_name_for_debug, uploaded_file_name_for_d
         return pd.DataFrame()
 
 
-def upload_to_supabase(uploaded_files, bucket_name="production-archive"):
+def upload_to_supabase(uploaded_files):
+    """بارگذاری فایل‌های خام به Supabase Storage (Archive)."""
     try:
         for file in uploaded_files:
             file_path = f"{file.name}"
-            supabase.storage.from_(bucket_name).upload(file_path, file.getvalue(), file_options={"content-type": file.type, "upsert": True})
+            # استفاده از upsert=True برای جایگزینی فایل‌های تکراری
+            supabase.storage.from_(ARCHIVE_BUCKET).upload(file_path, file.getvalue(), file_options={"content-type": file.type, "upsert": True})
         st.success(f"✅ {len(uploaded_files)} فایل با موفقیت به آرشیو ذخیره شدند.")
         return True
     except Exception as e:
@@ -150,9 +153,11 @@ def upload_to_supabase(uploaded_files, bucket_name="production-archive"):
 
 @st.cache_data(ttl=3600, show_spinner="دریافت اطلاعات از پایگاه داده...")
 def load_data_from_supabase_tables(table_name):
+    """بارگذاری داده‌ها از جداول Supabase."""
     try:
         response = supabase.table(table_name).select("*").execute()
         data = response.data
+        # ... (بقیه منطق load_data_from_supabase_tables بدون تغییر)
         if not data:
             return pd.DataFrame()
         
@@ -182,9 +187,11 @@ def load_data_from_supabase_tables(table_name):
         return df
 
     except Exception as e:
+        st.error(f"خطا در بارگذاری داده از جدول {table_name}: {e}")
         return pd.DataFrame()
 
 def insert_to_db(df, table_name):
+    # (منطق insert_to_db بدون تغییر)
     if df.empty:
         return True
     
@@ -207,8 +214,9 @@ def insert_to_db(df, table_name):
     except Exception as e:
         st.error(f"خطای کلی در درج داده به جدول {table_name}: {e}")
         return False
-        
+
 def calculate_oee_metrics(df_prod, df_err):
+    # (منطق calculate_oee_metrics بدون تغییر)
     if df_prod.empty:
         return 0, 0, 0, 0, 0, 0, 0, 0 
 
@@ -240,9 +248,23 @@ def calculate_oee_metrics(df_prod, df_err):
     
     return oee_pct, line_efficiency_pct, availability_pct, performance_pct, quality_pct, total_down_time_min, total_good_qty, total_pack_qty
 
+# --- تابع جدید برای لیست کردن آرشیو Storage ---
+@st.cache_data(ttl=60) # کش به مدت 60 ثانیه برای رفرش سریع
+def list_archived_files():
+    """دریافت لیست فایل‌های موجود در Storage (آرشیو)."""
+    try:
+        files = supabase.storage.from_(ARCHIVE_BUCKET).list()
+        
+        # حذف فولدرها و برگرداندن نام فایل‌ها
+        file_names = [f['name'] for f in files if f['name'] != '.emptyFolderPlaceholder']
+        return file_names
+    except Exception as e:
+        # اگر خطا 404 یا 500 باشد، ممکن است باکت درست نباشد
+        st.error(f"❌ خطای دسترسی به Supabase Storage (باکت {ARCHIVE_BUCKET}): {e}")
+        return []
 
 # ------------------------------------------------------------------------------
-# --- ۳. منطق اصلی برنامه و ناوبری (بازسازی شده) ---
+# --- ۳. منطق اصلی برنامه و ناوبری ---
 # ------------------------------------------------------------------------------
 
 def process_and_insert_data(uploaded_files, sheet_name_to_process):
@@ -272,6 +294,7 @@ def process_and_insert_data(uploaded_files, sheet_name_to_process):
             prod_df = read_production_data(df_raw_sheet, original_filename, sheet_name_to_process, file_date_obj)
             err_df = read_error_data(df_raw_sheet, sheet_name_to_process, original_filename, file_date_obj)
 
+            # ... (بقیه منطق درج داده)
             if not prod_df.empty and 'PackQty' in prod_df.columns:
                 prod_success = insert_to_db(prod_df, PROD_TABLE)
                 if prod_success:
@@ -293,12 +316,6 @@ def process_and_insert_data(uploaded_files, sheet_name_to_process):
 
             success_count += 1
 
-        except ValueError as e:
-            if 'Worksheet named' in str(e) and 'not found' in str(e):
-                status.write(f"❌ خطا در پردازش فایل اکسل **'{original_filename}'** (شیت: {sheet_name_to_process}): شیت با نام وارد شده پیدا نشد. **لطفاً نام شیت را بررسی کنید.**")
-            else:
-                status.write(f"❌ خطای پردازش فایل اکسل **'{original_filename}'** (شیت: {sheet_name_to_process}): ساختار شیت اکسل مطابقت ندارد. (جزئیات خطا: {e})")
-
         except Exception as e:
             status.write(f"❌ خطای نامشخص هنگام پردازش فایل **'{original_filename}'**: {e}")
 
@@ -307,17 +324,17 @@ def process_and_insert_data(uploaded_files, sheet_name_to_process):
     else:
         status.update(label=f"⚠️ {success_count} از {total_files} فایل با موفقیت پردازش شدند. جزئیات را بررسی کنید.", state="error", expanded=True)
         
+    # --- پاکسازی کش‌های اصلی برای به‌روزرسانی داشبورد و آرشیو ---
     st.cache_data.clear() 
     time.sleep(1) 
     st.rerun() 
 
-# --- ناوبری اصلی برنامه (منوی جامع) ---
+# --- ناوبری اصلی برنامه ---
 
 if 'page' not in st.session_state:
-    st.session_state.page = "Dashboard & KPIs" 
+    st.session_state.page = "📊 Dashboard & KPIs" 
 
 st.sidebar.header("منوی برنامه")
-# منوی کامل شامل تمامی بخش‌های تحلیل و مدیریتی
 page_options = ["📊 Dashboard & KPIs", "📈 Advanced Trend Analysis", "⬆️ Upload Data", "🗄️ Data Archive", "📧 Contact Me"] 
 try:
     selected_page_index = page_options.index(st.session_state.page)
@@ -358,11 +375,38 @@ if st.session_state.page == "⬆️ Upload Data":
         else:
             process_and_insert_data(uploaded_files, sheet_name_to_process.strip())
 
-# --- صفحه آرشیو داده ---
+# --- صفحه آرشیو داده (بهبود یافته) ---
 elif st.session_state.page == "🗄️ Data Archive":
-    st.header("🗄️ مدیریت و حذف داده‌های آرشیو")
+    st.header("🗄️ مدیریت آرشیو فایل‌های خام و داده‌های دیتابیس")
     
-    st.error("⚠️ هشدار: این بخش به شما اجازه می‌دهد تا تمام داده‌های یک جدول را حذف کنید. این عمل غیرقابل بازگشت است.")
+    st.subheader("۱. وضعیت آرشیو فایل‌های خام (Supabase Storage)")
+    file_list = list_archived_files()
+    
+    if file_list:
+        st.success(f"✅ تعداد {len(file_list)} فایل در آرشیو Storage موجود است.")
+        col_list, col_delete = st.columns([2, 1])
+        with col_list:
+            st.dataframe(pd.DataFrame({"نام فایل": file_list}), use_container_width=True, height=300)
+        
+        with col_delete:
+            delete_file_name = st.selectbox("فایل مورد نظر برای حذف از Storage:", file_list)
+            
+            if st.button(f"🗑️ حذف فایل '{delete_file_name}' از آرشیو"):
+                try:
+                    supabase.storage.from_(ARCHIVE_BUCKET).remove([delete_file_name])
+                    st.cache_data.clear() # پاکسازی کش برای به‌روزرسانی لیست
+                    st.success(f"✅ فایل **{delete_file_name}** با موفقیت از Storage حذف شد.")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ خطای حذف فایل از Storage: {e}")
+    else:
+        st.info("هیچ فایل خام در Supabase Storage (باکت production-archive) یافت نشد.")
+
+    st.markdown("---")
+    st.subheader("۲. حذف تمام داده‌های دیتابیس (خطرناک!)")
+    
+    st.error("⚠️ هشدار: حذف تمام داده‌های جدول تولید یا خطا. این عمل غیرقابل بازگشت است.")
 
     table_to_delete = st.selectbox(
         "جدول مورد نظر برای حذف داده‌ها:",
@@ -381,6 +425,7 @@ elif st.session_state.page == "🗄️ Data Archive":
     if delete_button_clicked:
         if delete_password == ARCHIVE_DELETE_PASSWORD:
             try:
+                # Safe deletion using a filter
                 supabase.table(table_to_delete).delete().neq('id', '0').execute() 
                 st.cache_data.clear() 
                 st.success(f"✅ تمام داده‌های جدول **{table_to_delete}** با موفقیت حذف شدند.")
@@ -391,9 +436,10 @@ elif st.session_state.page == "🗄️ Data Archive":
             st.error("رمز عبور حذف اشتباه است.")
 
 
-# --- صفحه تماس با من ---
+# --- صفحات دیگر (بدون تغییر) ---
 elif st.session_state.page == "📧 Contact Me":
     st.header("📧 تماس با توسعه‌دهنده")
+    # ... (محتوای صفحه تماس با من)
     st.markdown("---")
     st.markdown("""
     ### درباره این پلتفرم 💡
@@ -420,7 +466,6 @@ elif st.session_state.page == "📧 Contact Me":
     """)
 
 
-# --- صفحه تحلیل روند (پیشرفته) ---
 elif st.session_state.page == "📈 Advanced Trend Analysis":
     st.header("📈 تحلیل روند پیشرفته (Trend Analysis)")
 
@@ -454,6 +499,7 @@ elif st.session_state.page == "📈 Advanced Trend Analysis":
         daily_df['Performance'] = np.where(daily_df['OperatingTime'] > 0, (daily_df['TheoreticalRunTime'] / daily_df['OperatingTime']) * 100, 0)
         daily_df['Performance'] = daily_df['Performance'].apply(lambda x: min(x, 100))
         daily_df['OEE'] = (daily_df['Availability'] / 100) * (daily_df['Performance'] / 100) * (daily_df['Quality'] / 100) * 100
+        
         
         # --- Display Trend Charts ---
         st.subheader("روند کلی OEE و اجزای آن")
@@ -507,7 +553,6 @@ elif st.session_state.page == "📈 Advanced Trend Analysis":
         st.plotly_chart(fig_dual, use_container_width=True)
 
 
-# --- صفحه داشبورد و شاخص‌های کلیدی (جامع) ---
 elif st.session_state.page == "📊 Dashboard & KPIs":
     st.header("📊 داشبورد تحلیل جامع عملکرد")
     
@@ -568,7 +613,6 @@ elif st.session_state.page == "📊 Dashboard & KPIs":
             df_prod_filtered = df_prod_filtered[
                 df_prod_filtered["ProductTypeForTon"] == selected_machine
             ].copy()
-            # فیلتر کردن خطاهای مربوط به ماشین انتخاب شده (فرض بر این است که نام ماشین در Error Data به حروف کوچک ذخیره می‌شود)
             df_err_filtered = df_err_filtered[
                 df_err_filtered["machinetype"].str.contains(selected_machine.lower(), case=False, na=False)
             ].copy()
@@ -585,7 +629,6 @@ elif st.session_state.page == "📊 Dashboard & KPIs":
         col1, col2, col3, col4, col5 = st.columns(5)
         
         def display_metric_pro(col, label, value, color_threshold=85):
-            # ظاهر حرفه‌ای‌تر با استفاده از رنگ‌های تیره و خطوط باریک
             color = '#2ECC71' if value >= color_threshold else ('#FFC300' if value >= (color_threshold-15) else '#FF4B4B')
             col.markdown(f"""
             <div style='
@@ -601,7 +644,6 @@ elif st.session_state.page == "📊 Dashboard & KPIs":
             </div>
             """, unsafe_allow_html=True)
 
-        # نمایش OEE و اجزای آن
         display_metric_pro(col1, "OEE (اثربخشی کلی)", oee_pct, color_threshold=75)
         display_metric_pro(col2, "Availability (دسترسی)", availability_pct, color_threshold=85)
         display_metric_pro(col3, "Performance (عملکرد)", performance_pct, color_threshold=85)
