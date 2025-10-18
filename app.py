@@ -930,37 +930,37 @@ elif st.session_state.page == "Data Analyzing Dashboard":
             # Filter by machine first
             filtered_prod_df_by_machine = final_prod_df.copy()
             filtered_err_df_by_machine = final_err_df.copy()
-            
+         # ... (Lines 1 to 932 are unchanged) ...
+
+            # Filter by machine first
+            filtered_prod_df_by_machine = final_prod_df.copy()
+            filtered_err_df_by_machine = final_err_df.copy() # Initialize with the full error DataFrame
+
             if selected_machine != 'All Machines':
                 filtered_prod_df_by_machine = final_prod_df[
-                    final_prod_df["ProductionTypeForTon"] == selected_machine].copy()
-                filtered_err_df_by_machine = final_err_df[
-                    final_err_df["MachineType"] == selected_machine].copy()
+  
+                  final_prod_df["ProductionTypeForTon"] == selected_machine].copy()
+                
+                # --- FIX FOR KEY ERROR: 'MachineType' (Lines 937-938) ---
+                # Check if the error DataFrame is not empty AND contains the required column before filtering.
+                if not final_err_df.empty and "MachineType" in final_err_df.columns:
+                    filtered_err_df_by_machine = final_err_df[
+                        final_err_df["MachineType"] == selected_machine].copy()
+                else:
+                    # If empty or column is missing, keep filtered_err_df_by_machine as an empty DataFrame
+                    filtered_err_df_by_machine = pd.DataFrame()
+                # ---------------------------------------------------------
 
             # --- ALL PRODUCTS WILL BE SHOWN BY DEFAULT ---
             filtered_prod_df_by_product = filtered_prod_df_by_machine.copy()
-            
+     
+       
             # chart_prod_df is now directly the filtered production data
             chart_prod_df = filtered_prod_df_by_product.copy()
 
             
             # =========================================================================
-            # --- NEW: Daily Efficiency and OE Calculations (Per Machine and Per Product) ---
-            # =========================================================================
-
-            if not filtered_prod_df_by_product.empty:
-                st.subheader("Daily Overall Equipment Effectiveness (OE) & Line Efficiency")
-
-                # 1. Calculate Daily Metrics by MACHINE (Grouping by Date and MachineType)
-                daily_machine_metrics = calculate_metrics(
-                    prod_df=filtered_prod_df_by_product.copy(),
-                    err_df=filtered_err_df_by_machine.copy(),
-                    group_cols=['Date', 'ProductionTypeForTon']
-                )
-
-                # --- Display Machine Metrics ---
-                st.markdown("#### Machine Efficiency & OE Summary")
-
+# ... (The rest of the code is unchanged from line 946 onward) ...
                 # Display Overall Metrics for the entire period for the Machine
                 total_target_h_m = daily_machine_metrics['Total_Target_Hour'].sum()
                 total_net_prod_h_m = daily_machine_metrics['NetProduction_H'].sum()
