@@ -1033,25 +1033,8 @@ elif st.session_state.page == "Data Analyzing Dashboard":
                     use_container_width=True
                 )
                 
-                # --- REMOVED: Plotting the new trends (Line Efficiency and OE) - using Machine Metrics ---
-                # st.markdown("#### Machine Efficiency & OE Trend (Daily)")
-
-                # daily_metrics_melted_m = daily_machine_metrics.melt(
-                #     id_vars=['Date'], 
-                #     value_vars=['Line_Efficiency(%)', 'OE(%)'],
-                #     var_name='Metric',
-                #     value_name='Percentage'
-                # )
-
-                # fig_new_eff_m = px.line(
-                #     daily_metrics_melted_m, 
-                #     x="Date", 
-                #     y="Percentage", 
-                #     color="Metric",
-                #     title=f"Daily Line Efficiency and OE Trend for Machine: {selected_machine}", 
-                #     markers=True
-                # )
-                # st.plotly_chart(fig_new_eff_m, use_container_width=True)
+                # --- REMOVED: Machine Efficiency & OE Trend (Daily) ---
+                # This entire section was previously here and has been removed as requested.
 
                 st.markdown("---") 
 
@@ -1114,7 +1097,7 @@ elif st.session_state.page == "Data Analyzing Dashboard":
             # --- Display Combined Production Data ---
             st.subheader("Combined Production Data from Selected Files (Row-Level)")
             if not filtered_prod_df_by_product.empty:
-                # Prepare DataFrame without 'Efficiency(%)'
+                # Prepare DataFrame without 'Efficiency(%)' and other non-display columns
                 prod_display_cols = [col for col in filtered_prod_df_by_product.columns if col not in ['PotentialProduction', 'ProductionTypeForTon']]
                 
                 st.dataframe(
@@ -1164,6 +1147,7 @@ elif st.session_state.page == "Data Analyzing Dashboard":
                     st.info("No data found to display waste percentage.")
 
                 # --- NEW CHART: Line Efficiency & OE by Product (Overall) ---
+                # THIS IS THE REQUESTED REPLACEMENT CHART
                 st.subheader("Overall Line Efficiency & OE by Product (Selected Period)")
                 if not overall_product_metrics.empty:
                     # Melt the overall product metrics for Line Efficiency and OE
@@ -1197,32 +1181,8 @@ elif st.session_state.page == "Data Analyzing Dashboard":
                     st.info("No calculated Line Efficiency or OE data found to display by product.")
                 
                 # --- REMOVED: Efficiency by Product (Original Formula) ---
-                # st.subheader("Efficiency by Product (Original Formula)")
-                # chart_prod_df['PotentialProduction'] = chart_prod_df['NominalSpeed'] * chart_prod_df['Duration']
-                # agg_efficiency_df = chart_prod_df.groupby("Product").agg(
-                #     TotalPackQty=('PackQty', 'sum'),
-                #     TotalPotentialProduction=('PotentialProduction', 'sum')
-                # ).reset_index()
-                # agg_efficiency_df["Efficiency(%)"] = (
-                #     agg_efficiency_df.apply(
-                #         lambda row: (row["TotalPackQty"] / row["TotalPotentialProduction"] * 100) if row[
-                #             "TotalPotentialProduction"] > 0 else 0,
-                #         axis=1
-                #     )
-                # )
-                # agg_efficiency_df = agg_efficiency_df.sort_values(by="Efficiency(%)", ascending=False)
+                # This entire section was previously here and has been removed as requested.
 
-                # if not agg_efficiency_df.empty:
-                #     # Keeping this as a bar chart as efficiency is not typically tree-like
-                #     fig_efficiency = px.bar(agg_efficiency_df, x="Product", y="Efficiency(%)",
-                #                             title="Average Efficiency by Product (Original Formula)",
-                #                             color="Efficiency(%)",
-                #                             color_continuous_scale=px.colors.sequential.Greens,
-                #                             text_auto=True)
-                #     fig_efficiency.update_traces(textfont_size=14, textfont_color='black', textfont_weight='bold')
-                #     st.plotly_chart(fig_efficiency, use_container_width=True)
-                # else:
-                #     st.info("No data found to display efficiency.")
             else:
                 st.warning("No production data available for charts after applying filters.")
 
