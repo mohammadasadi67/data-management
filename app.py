@@ -9,6 +9,7 @@ import numpy as np
 
 # ==============================================================================
 # 0. تنظیمات و متغیرهای سراسری (Configuration & Global Variables)
+#    **کلیدها مستقیماً در کد قرار داده شده‌اند (Hardcoded) برای رفع مشکل Secrets**
 # ==============================================================================
 
 st.set_page_config(
@@ -18,14 +19,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# تعریف کلیدهای محرمانه از st.secrets
-try:
-    SUPABASE_URL = st.secrets["supabase_url"]
-    SUPABASE_KEY = st.secrets["supabase_key"]
-    ARCHIVE_DELETE_PASSWORD = st.secrets["archive_delete_password"]
-except KeyError:
-    st.error("خطا: کلیدهای Supabase یا رمز عبور حذف در Streamlit Secrets تعریف نشده‌اند.")
-    st.stop()
+# --- Supabase Configuration (Hardcoded) ---
+# این مقادیر از فایل اصلی شما گرفته شده‌اند
+SUPABASE_URL = "https://rlutsxvghmhrgcnqbmch.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdXRzeHZnaG1ocmdjbnFibWNoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NTEyODk5MSwiZXhwIjoyMDYwNzA0OTkxfQ.VPxbrPUw4E-MyRGklQMcxveUTznNlWLhPO-mqrHv9c"
+ARCHIVE_DELETE_PASSWORD = "beautifulmind"
 
 @st.cache_resource
 def get_supabase_client():
@@ -34,6 +32,7 @@ def get_supabase_client():
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
         return supabase
     except Exception as e:
+        # اگر خطای PGRST106 همچنان وجود دارد، خطا در اینجا نمایش داده می‌شود
         st.error(f"خطا در اتصال به پایگاه داده Supabase: {e}")
         st.stop()
 
@@ -46,7 +45,7 @@ supabase = get_supabase_client()
 def standardize_columns(df):
     """
     استانداردسازی نام ستون‌ها: حذف فاصله‌ها، تبدیل به Title Case و حذف کاراکترهای خاص.
-    این تابع مشکل 'KeyError: 'MachineType را حل می‌کند.
+    این تابع مشکل احتمالی 'KeyError' را حل می‌کند.
     """
     new_columns = {}
     for col in df.columns:
@@ -69,7 +68,6 @@ def parse_filename_date_to_datetime(filename):
 
 def load_data_from_supabase(table_name="production_data"):
     """بارگذاری تمام داده‌ها از Supabase با کش."""
-    # st.cache_data برای کش کردن داده‌ها استفاده می‌شود
     @st.cache_data(ttl=600) 
     def fetch_data():
         try:
@@ -81,9 +79,10 @@ def load_data_from_supabase(table_name="production_data"):
                 
             # تبدیل تاریخ‌های استخراج شده از Supabase به فرمت datetime
             if 'Date' in df.columns:
-                df['Date'] = pd.to_datetime(df['Date']).dt.date
+                df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date
             
-            return standardize_columns(df)
+            # استانداردسازی ستون‌ها برای جلوگیری از KeyError در فیلترها
+            return standardize_columns(df) 
         except Exception as e:
             st.error(f"خطا در بارگذاری داده‌ها از Supabase: {e}")
             return pd.DataFrame()
@@ -93,14 +92,13 @@ def load_data_from_supabase(table_name="production_data"):
 def process_uploaded_excel(uploaded_file, selected_sheet_name):
     """
     پردازش فایل اکسل آپلود شده و استخراج داده‌های Production و Error.
-    این تابع، خطاهای Syntax و Indentation را در توابع فرعی به درستی مدیریت می‌کند.
+    این تابع، خطاهای Syntax و Indentation را به درستی مدیریت می‌کند.
     """
     try:
         df_raw_sheet = pd.read_excel(uploaded_file, sheet_name=selected_sheet_name, header=None)
         
         # --- استخراج داده‌های Production ---
         # محدوده داده‌های تولید (بر اساس کدهای قدیمی شما)
-        # رفع خطای تورفتگی: اطمینان از تورفتگی صحیح در محیط GitHub
         data_prod = df_raw_sheet.iloc[3:9, 3:16].copy()
         
         # استخراج هدرها و تنظیم نام ستون
@@ -125,34 +123,32 @@ def process_uploaded_excel(uploaded_file, selected_sheet_name):
 
         # --- ترکیب داده‌ها و اطلاعات اولیه ---
         
-        # اطلاعات اولیه فایل
         filename = uploaded_file.name
         file_date = parse_filename_date_to_datetime(filename)
         shift = df_raw_sheet.iloc[1, 1].strip() if not pd.isna(df_raw_sheet.iloc[1, 1]) else 'Unknown'
         
-        # اضافه کردن ستون‌های Metadata به DataFrame تولید
+        # اضافه کردن ستون‌های Metadata
         df_prod['Date'] = file_date
         df_prod['Shift'] = shift
         df_prod['Filename'] = filename
         df_prod = df_prod.reset_index(drop=True)
 
-        # اضافه کردن ستون‌های Metadata به DataFrame خطا
         df_err['Date'] = file_date
         df_err['Shift'] = shift
         df_err['Filename'] = filename
         df_err = df_err.reset_index(drop=True)
 
-        # استانداردسازی نام ستون‌ها (اینجا مشکل KeyError را حل می‌کند)
+        # استانداردسازی نهایی
         df_prod = standardize_columns(df_prod)
         df_err = standardize_columns(df_err)
 
         return df_prod, df_err
 
     except Exception as e:
-        # رفع خطای SyntaxError با استفاده از Triple Quotes
+        # استفاده از Triple Quotes برای رفع خطای SyntaxError قبلی
         st.error(
             f"""
-            خطا در پردازش فایل اکسل '{uploaded_file.name}' (شیت: {selected_sheet_name}):
+            ❌ خطا در پردازش فایل اکسل '{uploaded_file.name}' (شیت: {selected_sheet_name}):
             ساختار شیت اکسل مطابقت ندارد. (جزئیات خطا: {e})
             لطفاً مطمئن شوید هدرها و محدوده داده‌ها در جای صحیح قرار دارند.
             """
@@ -166,16 +162,13 @@ def upload_to_supabase(df, table_name):
         st.warning("داده‌ای برای آپلود وجود ندارد.")
         return False
         
-    # حذف ستون‌های موقتی که در Supabase نیستند (اگر وجود داشته باشند)
     df_upload = df.copy()
-    
-    # تبدیل به دیکشنری و آپلود
     records = df_upload.to_dict('records')
     try:
         supabase.table(table_name).insert(records).execute()
         return True
     except Exception as e:
-        st.error(f"خطا در آپلود به جدول '{table_name}': {e}")
+        st.error(f"❌ خطا در آپلود به جدول '{table_name}': {e}")
         return False
 
 
@@ -185,11 +178,11 @@ def upload_to_supabase(df, table_name):
 
 # ستون کناری (Sidebar)
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/1/10/Streamlit_logo.png", width=50) # 
+    st.image("https://upload.wikimedia.org/wikipedia/commons/1/10/Streamlit_logo.png", width=50) 
     st.title("منوی مدیریت داده")
     st.markdown("---")
     
-    # کنترل صفحات با استفاده از Session State (جایگزین دکمه‌های قبلی)
+    # مدیریت صفحات
     if 'page' not in st.session_state:
         st.session_state.page = "Upload"
         
@@ -201,9 +194,11 @@ with st.sidebar:
         st.session_state.page = "Archive"
 
     st.markdown("---")
-    # توضیحات و تماس (مانند بخش Contact Me در کد قبلی شما)
     st.markdown("Developed by M. Asadollahzadeh")
     st.markdown("📧 Email: m.asdz@yahoo.com")
+    # افزودن توضیحات شما از فایل test.txt به صورت یک بخش کوچک در سایدبار
+    with st.expander("درباره پلتفرم"):
+         st.caption("این پلتفرم با تمرکز بر ترکیب اتوماسیون و هوش داده‌محور توسعه یافته است. از حمایت و بازخوردهای شما استقبال می‌کنم.")
 
 
 # ==============================================================================
@@ -228,7 +223,6 @@ if st.session_state.page == "Upload":
     if upload_button and uploaded_files:
         st.subheader("نتایج پردازش")
         
-        # حذف داده‌های کش شده قبل از آپلود جدید
         st.cache_data.clear() 
 
         total_files = len(uploaded_files)
@@ -238,20 +232,15 @@ if st.session_state.page == "Upload":
             for i, file in enumerate(uploaded_files):
                 st.write(f"({i+1}/{total_files}) پردازش فایل: **{file.name}**")
                 
-                # ۱. پردازش فایل
                 df_prod, df_err = process_uploaded_excel(file, sheet_name)
                 
                 if df_prod.empty and df_err.empty:
-                    st.warning(f"⚠️ فایل **{file.name}** پردازش نشد یا خالی بود. (به لاگ خطا توجه کنید)")
+                    st.warning(f"⚠️ فایل **{file.name}** پردازش نشد یا خالی بود.")
                     continue
                 
-                # ۲. آپلود داده‌های تولید
                 upload_prod_success = upload_to_supabase(df_prod, "production_data")
                 
-                # ۳. آپلود داده‌های خطا (اختیاری: اگر جدول error_data در Supabase دارید)
-                # upload_err_success = upload_to_supabase(df_err, "error_data") 
-                
-                if upload_prod_success: # and upload_err_success:
+                if upload_prod_success: 
                     success_count += 1
                     st.success(f"✅ فایل **{file.name}** با موفقیت آپلود شد.")
                 else:
@@ -262,7 +251,6 @@ if st.session_state.page == "Upload":
             else:
                 status.update(label=f"⚠️ {success_count} از {total_files} فایل آپلود شدند. جزئیات را بررسی کنید.", state="warning", expanded=True)
                 
-        # Clear the file uploader after processing
         st.rerun()
 
 
@@ -270,16 +258,13 @@ elif st.session_state.page == "Analysis":
     st.header("📈 داشبورد و تحلیل عملکرد تولید")
     st.markdown("---")
 
-    # بارگذاری داده‌ها با استفاده از کش
     df_all = load_data_from_supabase()
 
     if df_all.empty:
         st.info("داده‌ای برای تحلیل وجود ندارد. لطفاً ابتدا فایل‌ها را بارگذاری کنید.")
     else:
-        # استفاده از ستون‌های هوشمند برای فیلترها
         
-        # ۱. استخراج ستون‌های کلیدی (پس از استانداردسازی)
-        if 'ProductionTypeForTon' in df_all.columns and 'Date' in df_all.columns:
+        if 'Productiontypeforton' in df_all.columns and 'Date' in df_all.columns:
             
             # فیلترها
             col_filt1, col_filt2, col_filt3 = st.columns(3)
@@ -295,7 +280,7 @@ elif st.session_state.page == "Analysis":
                 )
                 
             with col_filt2:
-                all_products = ['All'] + sorted(df_all['ProductionTypeForTon'].unique().tolist())
+                all_products = ['All'] + sorted(df_all['Productiontypeforton'].unique().tolist())
                 selected_product = st.selectbox("نوع محصول:", all_products)
                 
             # فیلتر کردن نهایی
@@ -305,24 +290,25 @@ elif st.session_state.page == "Analysis":
             ]
             
             if selected_product != 'All':
-                df_filtered = df_filtered[df_filtered['ProductionTypeForTon'] == selected_product]
+                # **توجه: نام ستون Productiontypeforton پس از استانداردسازی استفاده شده است.**
+                df_filtered = df_filtered[df_filtered['Productiontypeforton'] == selected_product]
 
             st.markdown("### نمودار تحلیل عملکرد")
             
             # تجمیع داده‌ها برای نمودار
-            df_chart = df_filtered.groupby(['Date', 'ProductionTypeForTon'])['ProductionValue'].sum().reset_index()
+            df_chart = df_filtered.groupby(['Date', 'Productiontypeforton'])['Productionvalue'].sum().reset_index()
             
             if not df_chart.empty:
                 # نمودار فوق گرافیکی با Plotly
                 fig = px.bar(
                     df_chart, 
                     x='Date', 
-                    y='ProductionValue', 
-                    color='ProductionTypeForTon',
+                    y='Productionvalue', 
+                    color='Productiontypeforton',
                     title='تولید تجمعی بر اساس تاریخ و نوع محصول',
-                    labels={'ProductionValue': 'مقدار تولید (تن)', 'Date': 'تاریخ'},
+                    labels={'Productionvalue': 'مقدار تولید (تن)', 'Date': 'تاریخ'},
                     height=500,
-                    template="plotly_dark" # تم تیره برای UI جذاب
+                    template="plotly_dark" 
                 )
                 fig.update_layout(xaxis_title="تاریخ", yaxis_title="مقدار تولید (تن)")
                 st.plotly_chart(fig, use_container_width=True)
@@ -332,40 +318,32 @@ elif st.session_state.page == "Analysis":
             else:
                 st.warning("داده‌ای با فیلترهای اعمال شده پیدا نشد.")
         else:
-            st.warning("ستون‌های لازم (ProductionTypeForTon یا Date) در داده‌های Supabase شما وجود ندارد.")
+            st.warning("ستون‌های لازم (Productiontypeforton یا Date) در داده‌های Supabase شما وجود ندارد. لطفاً داده‌های اکسل جدید آپلود کنید.")
 
 
 elif st.session_state.page == "Archive":
     st.header("🗄️ مدیریت و حذف داده‌های آرشیو")
     st.markdown("---")
     
-    st.warning("این بخش به شما اجازه می‌دهد تا تمام داده‌های یک جدول را حذف کنید. این عمل غیرقابل بازگشت است.")
+    st.warning("⚠️ این بخش به شما اجازه می‌دهد تا تمام داده‌های یک جدول را حذف کنید. این عمل غیرقابل بازگشت است.")
 
     table_to_delete = st.selectbox(
         "جدول مورد نظر برای حذف داده‌ها:",
-        ["production_data", "error_data"], # شما باید نام جداول خود را وارد کنید
+        ["production_data", "error_data"],
         key="archive_table_select"
     )
     
     delete_password = st.text_input("رمز عبور حذف:", type="password")
     
-    if st.button(f"حذف تمام داده‌های جدول '{table_to_delete}'", type="danger", use_container_width=True):
+    if st.button(f"🔥 حذف تمام داده‌های جدول '{table_to_delete}'", type="danger", use_container_width=True):
         if delete_password == ARCHIVE_DELETE_PASSWORD:
             try:
                 # دستور حذف تمام سطرها
-                supabase.table(table_to_delete).delete().neq('id', '0').execute()
-                # حذف کش داده‌ها برای به روز رسانی سریع UI
+                # از neq('id', '0') استفاده می‌شود تا از RLS های احتمالی Supabase عبور کند
+                supabase.table(table_to_delete).delete().neq('id', '0').execute() 
                 st.cache_data.clear() 
                 st.success(f"✅ تمام داده‌های جدول **{table_to_delete}** با موفقیت حذف شدند.")
             except Exception as e:
                 st.error(f"❌ خطای حذف: {e}")
         else:
             st.error("رمز عبور حذف اشتباه است.")
-            
-# ==============================================================================
-# ۴. اجرای مجدد (Rerun) برای به‌روزرسانی سریع
-# ==============================================================================
-# این خط برای رفع مشکلات آپلود در یک ران سریع مفید است
-if st.session_state.get('rerun_after_upload'):
-    st.session_state.rerun_after_upload = False
-    st.experimental_rerun()
