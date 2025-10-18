@@ -25,8 +25,8 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 # --- DB Table Names ---
 PROD_TABLE = "production_data"
 ERROR_TABLE = "error_data"
-# --- !!! تصحیح: نام باکت Storage بر اساس دستور شما !!! ---
-ARCHIVE_BUCKET = "upload" 
+# --- !!! باکت شما !!! ---
+ARCHIVE_BUCKET = "uploads" 
 # --- Password for Archive Deletion ---
 ARCHIVE_DELETE_PASSWORD = "beautifulmind"
 
@@ -153,6 +153,7 @@ def upload_to_supabase(uploaded_files):
 @st.cache_data(ttl=3600, show_spinner="دریافت اطلاعات از پایگاه داده...")
 def load_data_from_supabase_tables(table_name):
     """بارگذاری داده‌ها از جداول Supabase."""
+    # (کد مربوط به بارگذاری جداول دیتابیس بدون تغییر)
     try:
         response = supabase.table(table_name).select("*").execute()
         data = response.data
@@ -190,6 +191,7 @@ def load_data_from_supabase_tables(table_name):
         return pd.DataFrame()
 
 def insert_to_db(df, table_name):
+    # (کد درج داده به دیتابیس بدون تغییر)
     if df.empty:
         return True
     
@@ -214,6 +216,7 @@ def insert_to_db(df, table_name):
         return False
 
 def calculate_oee_metrics(df_prod, df_err):
+    # (کد محاسبه OEE بدون تغییر)
     if df_prod.empty:
         return 0, 0, 0, 0, 0, 0, 0, 0 
 
@@ -245,19 +248,31 @@ def calculate_oee_metrics(df_prod, df_err):
     
     return oee_pct, line_efficiency_pct, availability_pct, performance_pct, quality_pct, total_down_time_min, total_good_qty, total_pack_qty
 
-# --- تابع جدید برای لیست کردن آرشیو Storage ---
+# --- تابع جدید برای لیست کردن آرشیو Storage با قابلیت عیب‌یابی (DEBUGGING) ---
 @st.cache_data(ttl=60) # کش به مدت 60 ثانیه برای رفرش سریع
 def list_archived_files():
-    """دریافت لیست فایل‌های موجود در Storage (آرشیو)."""
+    """دریافت لیست فایل‌های موجود در Storage (آرشیو) با نمایش خطاهای احتمالی."""
+    st.info(f"در حال تلاش برای لیست کردن فایل‌ها از باکت: **{ARCHIVE_BUCKET}**")
     try:
-        files = supabase.storage.from_(ARCHIVE_BUCKET).list()
+        # استفاده از list() برای بازگرداندن محتویات روت باکت
+        files = supabase.storage.from_(ARCHIVE_BUCKET).list(path="", options={"limit": 5000, "directories": False})
         
-        # حذف فولدرها و برگرداندن نام فایل‌ها
-        file_names = [f['name'] for f in files if f['name'] != '.emptyFolderPlaceholder']
+        # بررسی خطاهای API که ممکن است به صورت یک آیتم در لیست بازگردانده شوند
+        if files and isinstance(files, list) and len(files) == 1 and 'error' in files[0]:
+            error_message = files[0].get('message', 'خطای نامشخص در Storage')
+            st.error(f"❌ خطای Storage از طرف Supabase (کد خطا: {files[0].get('statusCode', 'N/A')}): **{error_message}**")
+            return []
+            
+        # فیلتر کردن دایرکتوری‌ها و آیتم‌های نامعتبر
+        file_names = [f['name'] for f in files if f and f.get('name') != '.emptyFolderPlaceholder' and 'name' in f]
+        
+        if file_names:
+            st.success(f"✅ Supabase موفق به بازگرداندن {len(file_names)} فایل شد.")
         return file_names
+        
     except Exception as e:
-        # اگر خطا 404 یا 500 باشد، ممکن است باکت درست نباشد
-        st.error(f"❌ خطای دسترسی به Supabase Storage (باکت {ARCHIVE_BUCKET}): {e}")
+        # خطای کلی شبکه یا پایتون
+        st.error(f"❌ خطای کلی در تابع لیست کردن Storage (احتمالاً شبکه یا Policy): {e}")
         return []
 
 # ------------------------------------------------------------------------------
@@ -335,12 +350,13 @@ page_options = ["📊 Dashboard & KPIs", "📈 Advanced Trend Analysis", "⬆️
 try:
     selected_page_index = page_options.index(st.session_state.page)
 except ValueError:
-    selected_page_index = 0 # Default to Dashboard if state is invalid
+    selected_page_index = 0 
 
 selected_page = st.sidebar.radio("برو به:", options=page_options, index=selected_page_index, key="sidebar_radio")
 
 if selected_page != st.session_state.page:
     st.session_state.page = selected_page
+    st.cache_data.clear() # پاکسازی قوی کش هنگام تغییر صفحه
     st.rerun()
 
 # ------------------------------------------------------------------------------
@@ -376,6 +392,8 @@ elif st.session_state.page == "🗄️ Data Archive":
     st.header("🗄️ مدیریت آرشیو فایل‌های خام و داده‌های دیتابیس")
     
     st.subheader(f"۱. وضعیت آرشیو فایل‌های خام (Supabase Storage: {ARCHIVE_BUCKET})")
+    
+    # 🚨 فراخوانی تابع با قابلیت عیب‌یابی 🚨
     file_list = list_archived_files()
     
     if file_list:
@@ -397,11 +415,12 @@ elif st.session_state.page == "🗄️ Data Archive":
                 except Exception as e:
                     st.error(f"❌ خطای حذف فایل از Storage: {e}")
     else:
-        st.info(f"هیچ فایل خام در Supabase Storage (باکت {ARCHIVE_BUCKET}) یافت نشد.")
+        st.info(f"هیچ فایل خام در Supabase Storage (باکت {ARCHIVE_BUCKET}) یافت نشد (یا خطای دسترسی وجود دارد - پیام‌های بالا را بررسی کنید).")
 
     st.markdown("---")
     st.subheader("۲. حذف تمام داده‌های دیتابیس (خطرناک!)")
     
+    # (بقیه کد صفحه آرشیو بدون تغییر)
     st.error("⚠️ هشدار: حذف تمام داده‌های جدول تولید یا خطا. این عمل غیرقابل بازگشت است.")
 
     table_to_delete = st.selectbox(
@@ -434,6 +453,7 @@ elif st.session_state.page == "🗄️ Data Archive":
 
 # --- صفحات دیگر (بدون تغییر) ---
 elif st.session_state.page == "📧 Contact Me":
+    # (محتوای صفحه تماس با من)
     st.header("📧 تماس با توسعه‌دهنده")
     st.markdown("---")
     st.markdown("""
@@ -462,6 +482,7 @@ elif st.session_state.page == "📧 Contact Me":
 
 
 elif st.session_state.page == "📈 Advanced Trend Analysis":
+    # (محتوای صفحه تحلیل روند بدون تغییر)
     st.header("📈 تحلیل روند پیشرفته (Trend Analysis)")
 
     df_prod_all = load_data_from_supabase_tables(PROD_TABLE)
@@ -549,6 +570,7 @@ elif st.session_state.page == "📈 Advanced Trend Analysis":
 
 
 elif st.session_state.page == "📊 Dashboard & KPIs":
+    # (محتوای صفحه داشبورد بدون تغییر)
     st.header("📊 داشبورد تحلیل جامع عملکرد")
     
     # --- Connection Status Check ---
