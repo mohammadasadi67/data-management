@@ -59,10 +59,10 @@ def load_data_from_supabase(table_name):
         return pd.DataFrame()
 
 def list_archived_files():
-    """Lists files from the 'archive' Supabase storage bucket."""
+    """Lists files from the 'upload' Supabase storage bucket."""
     try:
-        # Use the global supabase client to access Storage
-        response = supabase.storage.from_("archive").list()
+        # Changed bucket name from "archive" to "upload"
+        response = supabase.storage.from_("upload").list()
         
         # Supabase list() returns a list of file metadata dictionaries.
         if isinstance(response, list):
@@ -72,12 +72,39 @@ def list_archived_files():
         else:
             # Handle potential error dictionaries returned by the API call
             error_message = response.get('message', 'خطای نامشخص') if isinstance(response, dict) else 'فرمت پاسخ نامعتبر'
-            st.error(f"خطا در لیست کردن فایل‌های آرشیو: {error_message}")
+            st.error(f"خطا در لیست کردن فایل‌های آپلود: {error_message}")
             return []
             
     except Exception as e:
         st.error(f"خطای کلی در دسترسی به آرشیو Supabase: {e}")
         return []
+
+def upload_file_to_archive(uploaded_file):
+    """Uploads a file to the 'upload' Supabase storage bucket."""
+    try:
+        # File needs to be read as bytes for the upload
+        file_bytes = uploaded_file.read()
+        file_path = uploaded_file.name
+        
+        # Changed bucket name from "archive" to "upload"
+        response = supabase.storage.from_("upload").upload(
+            file_path, 
+            file_bytes, 
+            file_options={"content-type": uploaded_file.type, "upsert": "true"}
+        )
+        
+        if response and 'Key' in response:
+            return True, f"فایل **{uploaded_file.name}** با موفقیت آپلود یا جایگزین شد."
+        elif response and isinstance(response, dict) and 'error' in response:
+            # Handle explicit error messages from the Supabase client
+            return False, f"خطای Supabase: {response.get('error')}"
+        else:
+             # General success case where Key might be present but we rely on lack of explicit error
+            return True, f"فایل **{uploaded_file.name}** با موفقیت آپلود شد."
+
+    except Exception as e:
+        return False, f"خطای غیرمنتظره در حین آپلود: {e}"
+
 
 def process_uploaded_files(uploaded_files, file_type):
     """Processes uploaded Excel files for production or error data."""
@@ -279,7 +306,6 @@ def Data_Analyzing_Dashboard():
     st.markdown("---")
 
     # --- 2. Combined Production Data Table ---
-    # **درخواست ۲: حذف ستون افیشنسی از جدول Combined Production Data**
     st.subheader("Combined Production Data from Selected Files (Row-Level Efficiency)")
     df_display = prod_df_filtered.copy()
     
@@ -292,8 +318,6 @@ def Data_Analyzing_Dashboard():
     st.markdown("---")
 
     # --- 3. Product Metrics Bar Chart (Replaced) ---
-    # **درخواست ۳: جایگزینی نمودار average efficiency by product با بار چارت IE و OE**
-    
     # Calculate metrics grouped by Product
     metrics_by_product = calculate_metrics(prod_df_filtered, err_df_filtered, group_cols=['Product', 'ProductionTypeForTon'])
 
@@ -315,7 +339,6 @@ def Data_Analyzing_Dashboard():
     st.markdown("---")
 
     # --- 4. Downtime Error Breakdown (New Chart) ---
-    # **درخواست ۴: افزودن نمایش خطاهای Down Time**
     if not err_df_filtered.empty and 'Error' in err_df_filtered.columns and 'Duration' in err_df_filtered.columns:
         st.subheader("تجزیه و تحلیل کد خطای توقف (Downtime Error Code Breakdown) - بر حسب دقیقه")
         
@@ -345,9 +368,6 @@ def Data_Analyzing_Dashboard():
     elif not st.session_state.err_files_loaded:
         st.info("لطفاً فایل‌های خطای خود را برای نمایش این نمودار در بخش Data Management بارگذاری کنید.")
     
-    # --- 5. Removed Chart ---
-    # **درخواست ۱: حذف نمودار 'daily line efficiency and oe trend for machine'**
-    # این کدها در اینجا حذف شده‌اند.
     st.markdown("---")
 
 def Trend_Analysis():
@@ -380,9 +400,7 @@ def Trend_Analysis():
         prod_df_filtered = prod_df_filtered[prod_df_filtered['MachineType'] == selected_machine].copy()
         
         # --- FIX: Key Error for MachineType ---
-        # **رفع خطای KeyError: 'MachineType' در Trend Analysis**
         if 'MachineType' in final_err_df.columns:
-            # این خط همان خط ۹۳۸ در Traceback اصلی بود. با بررسی وجود ستون، از خطا جلوگیری می‌شود.
             final_err_df_filtered = final_err_df[
                 final_err_df["MachineType"] == selected_machine
             ].copy()
@@ -489,20 +507,44 @@ def Data_Management():
     
     # Placeholder for archiving and deletion logic (using Supabase config)
     st.markdown("---")
-    st.subheader("آرشیو (Supabase)")
+    st.subheader("Storage (Supabase)")
     
-    # New logic to list and display archived files
-    if st.button("تازه‌سازی و نمایش لیست آرشیو", key="refresh_archive"):
+    # ----------------------------------------------------
+    # NEW: Archive Upload Section
+    # ----------------------------------------------------
+    # Changed UI text to reflect "upload" bucket name
+    st.markdown("#### ⬆️ آپلود فایل به باکت **upload**")
+    archive_file_upload = st.file_uploader(
+        "انتخاب فایل برای آپلود مستقیم به باکت **upload**", 
+        type=['xlsx', 'csv', 'txt'], 
+        key="archive_uploader"
+    )
+    
+    if archive_file_upload:
+        if st.button("آپلود به Supabase Storage"):
+            with st.spinner(f"در حال آپلود **{archive_file_upload.name}**..."):
+                # Pass the file object directly to the new upload function
+                success, message = upload_file_to_archive(archive_file_upload)
+                if success:
+                    st.success(message + " برای مشاهده فایل، لطفاً لیست آرشیو را تازه سازی کنید.")
+                else:
+                    st.error(message)
+
+    st.markdown("---")
+    # ----------------------------------------------------
+    
+    # Logic to list and display archived files
+    if st.button("تازه‌سازی و نمایش لیست فایل‌ها (باکت upload)", key="refresh_archive"):
         with st.spinner("در حال بارگذاری لیست فایل‌ها..."):
             st.session_state.archived_files = list_archived_files()
         
     if st.session_state.archived_files:
-        st.success(f"تعداد {len(st.session_state.archived_files)} فایل در آرشیو یافت شد.")
+        st.success(f"تعداد {len(st.session_state.archived_files)} فایل در باکت **upload** یافت شد.")
         # Displaying the list of files in a clean dataframe
-        df_files = pd.DataFrame({'نام فایل آرشیو شده': st.session_state.archived_files})
+        df_files = pd.DataFrame({'نام فایل در باکت upload': st.session_state.archived_files})
         st.dataframe(df_files, use_container_width=True, height=200)
     else:
-        st.info("هیچ فایلی در آرشیو یافت نشد. برای به‌روزرسانی لیست، دکمه تازه‌سازی را بزنید.")
+        st.info("هیچ فایلی در باکت **upload** یافت نشد. برای به‌روزرسانی لیست، دکمه تازه‌سازی را بزنید.")
 
 def Contact_Me():
     st.subheader("ارتباط با محمد اسدالله‌زاده")
