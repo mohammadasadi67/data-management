@@ -25,7 +25,8 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 # --- DB Table Names ---
 PROD_TABLE = "production_data"
 ERROR_TABLE = "error_data"
-ARCHIVE_BUCKET = "production-archive" # نام باکت Storage
+# --- !!! تصحیح: نام باکت Storage بر اساس دستور شما !!! ---
+ARCHIVE_BUCKET = "upload" 
 # --- Password for Archive Deletion ---
 ARCHIVE_DELETE_PASSWORD = "beautifulmind"
 
@@ -56,8 +57,6 @@ COLUMN_MAP = {
     'تعداد نفرات': 'Manpower',
     'مدت زمان': 'Duration', 
 }
-
-# (توابع parse_filename_date_to_datetime، standardize_dataframe_for_oee، read_production_data، read_error_data بدون تغییر در منطق)
 
 def parse_filename_date_to_datetime(filename):
     match = re.search(r'(\d{8})', filename)
@@ -148,7 +147,7 @@ def upload_to_supabase(uploaded_files):
         st.success(f"✅ {len(uploaded_files)} فایل با موفقیت به آرشیو ذخیره شدند.")
         return True
     except Exception as e:
-        st.error(f"❌ خطا در آپلود فایل‌ها به Supabase Storage: {e}")
+        st.error(f"❌ خطا در آپلود فایل‌ها به Supabase Storage (باکت {ARCHIVE_BUCKET}): {e}")
         return False
 
 @st.cache_data(ttl=3600, show_spinner="دریافت اطلاعات از پایگاه داده...")
@@ -157,7 +156,7 @@ def load_data_from_supabase_tables(table_name):
     try:
         response = supabase.table(table_name).select("*").execute()
         data = response.data
-        # ... (بقیه منطق load_data_from_supabase_tables بدون تغییر)
+        
         if not data:
             return pd.DataFrame()
         
@@ -191,7 +190,6 @@ def load_data_from_supabase_tables(table_name):
         return pd.DataFrame()
 
 def insert_to_db(df, table_name):
-    # (منطق insert_to_db بدون تغییر)
     if df.empty:
         return True
     
@@ -216,7 +214,6 @@ def insert_to_db(df, table_name):
         return False
 
 def calculate_oee_metrics(df_prod, df_err):
-    # (منطق calculate_oee_metrics بدون تغییر)
     if df_prod.empty:
         return 0, 0, 0, 0, 0, 0, 0, 0 
 
@@ -294,7 +291,6 @@ def process_and_insert_data(uploaded_files, sheet_name_to_process):
             prod_df = read_production_data(df_raw_sheet, original_filename, sheet_name_to_process, file_date_obj)
             err_df = read_error_data(df_raw_sheet, sheet_name_to_process, original_filename, file_date_obj)
 
-            # ... (بقیه منطق درج داده)
             if not prod_df.empty and 'PackQty' in prod_df.columns:
                 prod_success = insert_to_db(prod_df, PROD_TABLE)
                 if prod_success:
@@ -379,11 +375,11 @@ if st.session_state.page == "⬆️ Upload Data":
 elif st.session_state.page == "🗄️ Data Archive":
     st.header("🗄️ مدیریت آرشیو فایل‌های خام و داده‌های دیتابیس")
     
-    st.subheader("۱. وضعیت آرشیو فایل‌های خام (Supabase Storage)")
+    st.subheader(f"۱. وضعیت آرشیو فایل‌های خام (Supabase Storage: {ARCHIVE_BUCKET})")
     file_list = list_archived_files()
     
     if file_list:
-        st.success(f"✅ تعداد {len(file_list)} فایل در آرشیو Storage موجود است.")
+        st.success(f"✅ تعداد **{len(file_list)}** فایل در آرشیو Storage موجود است.")
         col_list, col_delete = st.columns([2, 1])
         with col_list:
             st.dataframe(pd.DataFrame({"نام فایل": file_list}), use_container_width=True, height=300)
@@ -401,7 +397,7 @@ elif st.session_state.page == "🗄️ Data Archive":
                 except Exception as e:
                     st.error(f"❌ خطای حذف فایل از Storage: {e}")
     else:
-        st.info("هیچ فایل خام در Supabase Storage (باکت production-archive) یافت نشد.")
+        st.info(f"هیچ فایل خام در Supabase Storage (باکت {ARCHIVE_BUCKET}) یافت نشد.")
 
     st.markdown("---")
     st.subheader("۲. حذف تمام داده‌های دیتابیس (خطرناک!)")
@@ -439,7 +435,6 @@ elif st.session_state.page == "🗄️ Data Archive":
 # --- صفحات دیگر (بدون تغییر) ---
 elif st.session_state.page == "📧 Contact Me":
     st.header("📧 تماس با توسعه‌دهنده")
-    # ... (محتوای صفحه تماس با من)
     st.markdown("---")
     st.markdown("""
     ### درباره این پلتفرم 💡
