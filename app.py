@@ -601,7 +601,11 @@ def read_error_data(df_raw_sheet, sheet_name_for_debug="Unknown Sheet", uploaded
         
         # 7. Add Date and MachineType
         aggregated_errors['Date'] = file_date_obj
-        aggregated_errors['MachineType'] = determine_machine_type(sheet_name_for_debug)
+        # Ensure we use the determined machine type, even if the sheet name is complex.
+        machine_type = determine_machine_type(sheet_name_for_debug)
+        if machine_type == "Unknown Machine":
+             machine_type = determine_machine_type(uploaded_file_name_for_debug)
+        aggregated_errors['MachineType'] = machine_type
 
         return aggregated_errors.dropna(subset=['Date'])
     
@@ -631,6 +635,8 @@ def calculate_metrics(prod_df: pd.DataFrame, err_df: pd.DataFrame, group_cols: l
 
     if err_df.empty:
         # If no error data, fall back to simple efficiency based on actual running time (Total_Duration)
+        # However, for 24-hour based metrics, we cannot calculate accurately without error data.
+        # Fallback to 0 for downtime-related metrics to ensure continuity.
         prod_agg['NetProduction_H'] = prod_agg['Total_Duration']
         prod_agg['Line_Efficiency(%)'] = np.where(
             prod_agg['NetProduction_H'] > 0,
@@ -646,8 +652,7 @@ def calculate_metrics(prod_df: pd.DataFrame, err_df: pd.DataFrame, group_cols: l
         return prod_agg
 
     # --- 2. Aggregate Error Data and Convert to Hours ---
-    err_group_cols = [col for col in group_cols if col in err_df.columns]
-
+    
     daily_err_agg = err_df.copy() 
     daily_err_agg['Error'] = daily_err_agg['Error'].astype(str).str.strip()
 
@@ -657,8 +662,8 @@ def calculate_metrics(prod_df: pd.DataFrame, err_df: pd.DataFrame, group_cols: l
         # Duration is in minutes (from read_error_data) -> convert to hours by dividing by 60
         return df[df['Error'].isin(codes_str)]['Duration'].sum() / 60 
 
-    # Aggregate all error categories
-    err_summary = daily_err_agg.groupby(err_group_cols).apply(lambda x: pd.Series({
+    # Aggregate all error categories by the most detailed grouping possible in the error data (Date and MachineType)
+    err_summary = daily_err_agg.groupby(['Date', 'MachineType']).apply(lambda x: pd.Series({
         'LegalStoppage_H': sum_duration_for_codes(x, ['33']),
         'IdleTime_H': sum_duration_for_codes(x, ['32']),
         'Downtime_H': sum_duration_for_codes(x, [str(c) for c in range(21, 32)]), # 21 to 31
@@ -667,8 +672,17 @@ def calculate_metrics(prod_df: pd.DataFrame, err_df: pd.DataFrame, group_cols: l
     })).reset_index()
     
     # --- 3. Merge Production and Error Data ---
-    # Merge on shared grouping columns (Date, and MachineType/Product if present in both)
-    daily_metrics = pd.merge(prod_agg, err_summary, on=err_group_cols, how='left').fillna(0)
+    
+    # Rename 'ProductionTypeForTon' in prod_agg to 'MachineType' for merging if necessary
+    prod_agg_temp = prod_agg.copy()
+    if 'ProductionTypeForTon' in prod_agg_temp.columns:
+         prod_agg_temp = prod_agg_temp.rename(columns={'ProductionTypeForTon': 'MachineType'})
+         merge_cols = ['Date', 'MachineType']
+    else:
+         merge_cols = ['Date'] # Fallback if no machine type available
+
+    # Perform the merge using the common columns (Date and MachineType)
+    daily_metrics = pd.merge(prod_agg_temp, err_summary, on=merge_cols, how='left').fillna(0)
     
     # --- 4. Define Time Variables (in Hours) ---
     Total_Day_Hours = 24.0 # 6 morning to 6 morning next day is 24 hours
@@ -697,6 +711,10 @@ def calculate_metrics(prod_df: pd.DataFrame, err_df: pd.DataFrame, group_cols: l
         0
     )
     
+    # Rename MachineType back to ProductionTypeForTon if Product metrics are calculated (for consistency)
+    if 'Product' in group_cols and 'MachineType' in daily_metrics.columns:
+        daily_metrics = daily_metrics.rename(columns={'MachineType': 'ProductionTypeForTon'})
+
     return daily_metrics
 
 # --- Main Application ---
@@ -932,10 +950,18 @@ elif st.session_state.page == "Data Analyzing Dashboard":
             filtered_err_df_by_machine = final_err_df.copy()
             
             if selected_machine != 'All Machines':
+                # Filter production data
                 filtered_prod_df_by_machine = final_prod_df[
                     final_prod_df["ProductionTypeForTon"] == selected_machine].copy()
-                filtered_err_df_by_machine = final_err_df[
-                    final_err_df["MachineType"] == selected_machine].copy()
+                
+                # *** FIX: Check if MachineType exists BEFORE attempting to filter error data ***
+                if not final_err_df.empty and "MachineType" in final_err_df.columns:
+                    filtered_err_df_by_machine = final_err_df[
+                        final_err_df["MachineType"] == selected_machine].copy()
+                else:
+                    # If error data is missing the column or is empty, use an empty DataFrame
+                    filtered_err_df_by_machine = pd.DataFrame()
+
 
             # --- ALL PRODUCTS WILL BE SHOWN BY DEFAULT ---
             filtered_prod_df_by_product = filtered_prod_df_by_machine.copy()
@@ -952,6 +978,7 @@ elif st.session_state.page == "Data Analyzing Dashboard":
                 st.subheader("Daily Overall Equipment Effectiveness (OE) & Line Efficiency")
 
                 # 1. Calculate Daily Metrics by MACHINE (Grouping by Date and MachineType)
+                # ProductionTypeForTon in prod_df is the machine identifier
                 daily_machine_metrics = calculate_metrics(
                     prod_df=filtered_prod_df_by_product.copy(),
                     err_df=filtered_err_df_by_machine.copy(),
@@ -1035,7 +1062,7 @@ elif st.session_state.page == "Data Analyzing Dashboard":
                 daily_product_metrics = calculate_metrics(
                     prod_df=filtered_prod_df_by_product.copy(),
                     err_df=filtered_err_df_by_machine.copy(), # Note: Error data is only available at Machine/Date level, so we merge it with Date/Product.
-                    group_cols=['Date', 'Product']
+                    group_cols=['Date', 'Product', 'ProductionTypeForTon'] # We need ProductionTypeForTon for merging with error data inside the function
                 )
 
                 # --- Display Product Metrics ---
