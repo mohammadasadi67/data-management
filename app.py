@@ -12,8 +12,8 @@ import logging
 import time
 
 # تنظیمات اصلی برنامه
-st.set_page_config(layout="wide", page_title="OEE & Production Dashboard", initial_sidebar_state="expanded")
-st.title("📊 داشبورد تحلیل تولید و OEE")
+st.set_page_config(layout="wide", page_title="OEE & Production Data Analytics System", initial_sidebar_state="expanded")
+st.title("🧠 سیستم تحلیل هوشمند عملکرد تولید (OEE)")
 
 # ------------------------------------------------------------------------------
 # --- ۱. تنظیمات اتصال و متغیرهای سراسری ---
@@ -44,10 +44,9 @@ def get_supabase_client():
 supabase = get_supabase_client()
 
 # ------------------------------------------------------------------------------
-# --- ۲. توابع کمکی اصلی ---
+# --- ۲. توابع کمکی اصلی و محاسبات (بدون تغییر منطق) ---
 # ------------------------------------------------------------------------------
 
-# 🔑 واژه‌نامه برای نقشه‌برداری ستون‌های فارسی اکسل به نام‌های استاندارد انگلیسی (ضروری برای OEE)
 COLUMN_MAP = {
     'مقدار کل': 'PackQty', 
     'بسته': 'PackQty',
@@ -60,7 +59,6 @@ COLUMN_MAP = {
 }
 
 def parse_filename_date_to_datetime(filename):
-    """استخراج ddmmyyyy از نام فایل و تبدیل به آبجکت date."""
     match = re.search(r'(\d{8})', filename)
     if match:
         try:
@@ -70,7 +68,6 @@ def parse_filename_date_to_datetime(filename):
     return None
 
 def standardize_dataframe_for_oee(df, type='prod'):
-    """استانداردسازی نام ستون‌ها و تبدیل به انواع داده‌ای مورد نیاز."""
     df_standard = df.rename(columns=lambda x: COLUMN_MAP.get(x.strip(), x.strip())).copy()
     
     required_cols_prod = ['PackQty', 'Waste', 'Duration', 'Capacity', 'Ton']
@@ -88,7 +85,6 @@ def standardize_dataframe_for_oee(df, type='prod'):
     return df_standard
 
 def read_production_data(df_raw_sheet, uploaded_file_name, sheet_name_for_debug, file_date_obj):
-    """خوانش و پردازش داده‌های Production از محدوده D4:P9."""
     try:
         data_prod = df_raw_sheet.iloc[3:9, 3:16].copy() 
         headers_prod = df_raw_sheet.iloc[2, 3:16].tolist()
@@ -117,7 +113,6 @@ def read_production_data(df_raw_sheet, uploaded_file_name, sheet_name_for_debug,
 
 
 def read_error_data(df_raw_sheet, sheet_name_for_debug, uploaded_file_name_for_debug, file_date_obj):
-    """خوانش و پردازش داده‌های Error از محدوده D13:P15."""
     try:
         data_err = df_raw_sheet.iloc[12:15, 3:16].copy()
         headers_err = df_raw_sheet.iloc[11, 3:16].tolist()
@@ -143,7 +138,6 @@ def read_error_data(df_raw_sheet, sheet_name_for_debug, uploaded_file_name_for_d
 
 
 def upload_to_supabase(uploaded_files, bucket_name="production-archive"):
-    """بارگذاری فایل‌های خام به Supabase Storage (Archive)."""
     try:
         for file in uploaded_files:
             file_path = f"{file.name}"
@@ -156,9 +150,7 @@ def upload_to_supabase(uploaded_files, bucket_name="production-archive"):
 
 @st.cache_data(ttl=3600, show_spinner="دریافت اطلاعات از پایگاه داده...")
 def load_data_from_supabase_tables(table_name):
-    """بارگذاری داده‌ها از جداول Supabase با رفع مشکل Case Sensitivity."""
     try:
-        # Load all data without ordering in DB query
         response = supabase.table(table_name).select("*").execute()
         data = response.data
         if not data:
@@ -166,7 +158,6 @@ def load_data_from_supabase_tables(table_name):
         
         df = pd.DataFrame(data)
         
-        # Check for date column case and standardize to 'Date'
         date_col_in_db = None
         if 'date' in df.columns:
             date_col_in_db = 'date'
@@ -178,11 +169,9 @@ def load_data_from_supabase_tables(table_name):
             if date_col_in_db == 'date': 
                 df.drop(columns=['date'], inplace=True, errors='ignore')
             
-        # Sort the DataFrame by the standardized 'Date' column in Python
         if 'Date' in df.columns:
             df = df.sort_values(by='Date', ascending=True).reset_index(drop=True)
 
-        # Ensure numeric columns are correct
         for col in ['Duration', 'PackQty', 'Waste', 'Ton', 'Capacity', 'Manpower']:
             col_lower = col.lower()
             if col_lower in df.columns: 
@@ -196,11 +185,9 @@ def load_data_from_supabase_tables(table_name):
         return pd.DataFrame()
 
 def insert_to_db(df, table_name):
-    """درج DataFrame به جدول Supabase."""
     if df.empty:
         return True
     
-    # Column names are converted to lowercase for insertion (safer for PostgreSQL)
     df_insert = df.copy()
     df_insert.columns = [col.lower() for col in df_insert.columns]
     
@@ -222,9 +209,8 @@ def insert_to_db(df, table_name):
         return False
         
 def calculate_oee_metrics(df_prod, df_err):
-    """محاسبه OEE و اجزای آن."""
     if df_prod.empty:
-        return 0, 0, 0, 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, 0, 0, 0, 0 
 
     total_planned_time_min = df_prod["Duration"].sum() * 60
     total_down_time_min = df_err["Duration"].sum()
@@ -254,8 +240,9 @@ def calculate_oee_metrics(df_prod, df_err):
     
     return oee_pct, line_efficiency_pct, availability_pct, performance_pct, quality_pct, total_down_time_min, total_good_qty, total_pack_qty
 
+
 # ------------------------------------------------------------------------------
-# --- ۳. منطق اصلی برنامه و ناوبری ---
+# --- ۳. منطق اصلی برنامه و ناوبری (بازسازی شده) ---
 # ------------------------------------------------------------------------------
 
 def process_and_insert_data(uploaded_files, sheet_name_to_process):
@@ -324,28 +311,37 @@ def process_and_insert_data(uploaded_files, sheet_name_to_process):
     time.sleep(1) 
     st.rerun() 
 
-# --- ناوبری اصلی برنامه ---
+# --- ناوبری اصلی برنامه (منوی جامع) ---
 
 if 'page' not in st.session_state:
-    st.session_state.page = "Data Analyzing Dashboard" 
+    st.session_state.page = "Dashboard & KPIs" 
 
 st.sidebar.header("منوی برنامه")
-page_options = ["Data Analyzing Dashboard", "Upload Data", "Trend Analysis", "Data Archive"] 
-selected_page_index = page_options.index(st.session_state.page)
+# منوی کامل شامل تمامی بخش‌های تحلیل و مدیریتی
+page_options = ["📊 Dashboard & KPIs", "📈 Advanced Trend Analysis", "⬆️ Upload Data", "🗄️ Data Archive", "📧 Contact Me"] 
+try:
+    selected_page_index = page_options.index(st.session_state.page)
+except ValueError:
+    selected_page_index = 0 # Default to Dashboard if state is invalid
+
 selected_page = st.sidebar.radio("برو به:", options=page_options, index=selected_page_index, key="sidebar_radio")
 
 if selected_page != st.session_state.page:
     st.session_state.page = selected_page
     st.rerun()
 
+# ------------------------------------------------------------------------------
+# --- ۴. پیاده‌سازی صفحات ---
+# ------------------------------------------------------------------------------
 
-if st.session_state.page == "Upload Data":
+# --- صفحه بارگذاری داده ---
+if st.session_state.page == "⬆️ Upload Data":
     st.header("⬆️ بارگذاری فایل‌های اکسل و درج در پایگاه داده")
 
     sheet_name_to_process = st.text_input(
         "نام شیت (Sheet Name) حاوی داده‌ها:",
         value="daily", 
-        help="نام دقیق شیتی که داده‌های تولید و خطا در آن قرار دارند (حساس به حروف کوچک و بزرگ)."
+        help="نام دقیق شیتی که داده‌های تولید و خطا در آن قرار دارند."
     )
 
     uploaded_files = st.file_uploader(
@@ -362,11 +358,11 @@ if st.session_state.page == "Upload Data":
         else:
             process_and_insert_data(uploaded_files, sheet_name_to_process.strip())
 
-
-elif st.session_state.page == "Data Archive":
+# --- صفحه آرشیو داده ---
+elif st.session_state.page == "🗄️ Data Archive":
     st.header("🗄️ مدیریت و حذف داده‌های آرشیو")
     
-    st.warning("⚠️ این بخش به شما اجازه می‌دهد تا تمام داده‌های یک جدول را حذف کنید. این عمل غیرقابل بازگشت است.")
+    st.error("⚠️ هشدار: این بخش به شما اجازه می‌دهد تا تمام داده‌های یک جدول را حذف کنید. این عمل غیرقابل بازگشت است.")
 
     table_to_delete = st.selectbox(
         "جدول مورد نظر برای حذف داده‌ها:",
@@ -385,7 +381,6 @@ elif st.session_state.page == "Data Archive":
     if delete_button_clicked:
         if delete_password == ARCHIVE_DELETE_PASSWORD:
             try:
-                # Safe deletion using a filter
                 supabase.table(table_to_delete).delete().neq('id', '0').execute() 
                 st.cache_data.clear() 
                 st.success(f"✅ تمام داده‌های جدول **{table_to_delete}** با موفقیت حذف شدند.")
@@ -396,12 +391,128 @@ elif st.session_state.page == "Data Archive":
             st.error("رمز عبور حذف اشتباه است.")
 
 
-elif st.session_state.page == "Data Analyzing Dashboard":
-    st.header("📈 داشبورد تحلیل OEE و تولید")
+# --- صفحه تماس با من ---
+elif st.session_state.page == "📧 Contact Me":
+    st.header("📧 تماس با توسعه‌دهنده")
+    st.markdown("---")
+    st.markdown("""
+    ### درباره این پلتفرم 💡
+
+    در دنیای امروز با پیشرفت‌های سریع تکنولوژی، هوش مصنوعی (AI) دیگر یک انتخاب نیست، بلکه یک **ضرورت** است. استفاده از هوش مصنوعی می‌تواند به طور چشمگیری عملکرد را افزایش دهد، خطای انسانی را به حداقل برساند و جریان کاری را ساده کند. تکیه صرف به روش‌های سنتی اغلب منجر به هدر رفتن زمان و تلاش می‌شود، بدون آنکه کارایی لازم حاصل شود.
+
+    برای پاسخ به این نیاز، من توسعه پلتفرمی را آغاز کردم که **اتوماسیون** را با **هوشمندی** ترکیب می‌کند. با الهام از علاقه‌ام به پایتون (با وجود اینکه هنوز در حال یادگیری هستم) و اشتیاق عمیق برای ایجاد راه‌حل‌های فنی منظم و مبتنی بر داده، توسعه این وب‌سایت مبتنی بر Streamlit را برای تحلیل روزانه عملکرد تولید آغاز کردم.
+
+    در طول این فرآیند، ابزارهایی مانند **Gemini AI** در اشکال‌زدایی، پالایش استراتژی‌ها و به حقیقت پیوستن این ایده بسیار مؤثر بودند. صادقانه بگویم، بدون کمک هوش مصنوعی، رسیدن به این نقطه بسیار دشوارتر می‌شد.
+
+    من متعهد به بهبود هستم—هم در کدنویسی و هم در طراحی سیستم. از بازخورد، پیشنهادات، یا هر گونه راهنمایی برای بهبود بیشتر این پلتفرم استقبال می‌کنم.
+
+    ---
+
+    **اطلاعات تماس:**
+
+    📧 **ایمیل:** m.asdz@yahoo.com  
+    🔗 **لینکدین:** [Mohammad Asdollahzadeh](https://www.linkedin.com/in/mohammad-asdollahzadeh)
+
+    با تشکر از بازدید شما، و از حمایت شما صمیمانه قدردانی می‌کنم.
+
+    با احترام،
+    **محمد اسدالله زاده**
+    """)
+
+
+# --- صفحه تحلیل روند (پیشرفته) ---
+elif st.session_state.page == "📈 Advanced Trend Analysis":
+    st.header("📈 تحلیل روند پیشرفته (Trend Analysis)")
+
+    df_prod_all = load_data_from_supabase_tables(PROD_TABLE)
+    df_err_all = load_data_from_supabase_tables(ERROR_TABLE)
+
+    if df_prod_all.empty:
+        st.warning("داده‌ای برای تحلیل روند وجود ندارد. لطفاً ابتدا داده‌ها را بارگذاری کنید.")
+    else:
+        # Aggregate data by Date for Trend Analysis (Comprehensive)
+        daily_summary = df_prod_all.groupby("Date").agg(
+            TotalPackQty=('PackQty', 'sum'),
+            TotalWaste=('Waste', 'sum'),
+            TotalDuration=('Duration', 'sum'), # in hours
+            AvgCapacity=('Capacity', 'mean')
+        ).reset_index()
+        
+        daily_errors = df_err_all.groupby("Date")["Duration"].sum().reset_index().rename(columns={"Duration": "TotalDowntime"}) # in minutes
+        daily_df = pd.merge(daily_summary, daily_errors, on="Date", how="left").fillna(0)
+        
+        # OEE/KPI Calculation on Daily Data
+        daily_df['TotalDurationMin'] = daily_df['TotalDuration'] * 60
+        daily_df['OperatingTime'] = daily_df['TotalDurationMin'] - daily_df['TotalDowntime']
+        daily_df['OperatingTime'] = daily_df['OperatingTime'].apply(lambda x: max(0, x))
+        
+        daily_df['Availability'] = np.where(daily_df['TotalDurationMin'] > 0, (daily_df['OperatingTime'] / daily_df['TotalDurationMin']) * 100, 0)
+        daily_df['TotalGoodQty'] = daily_df['TotalPackQty'] - daily_df['TotalWaste']
+        daily_df['Quality'] = np.where(daily_df['TotalPackQty'] > 0, (daily_df['TotalGoodQty'] / daily_df['TotalPackQty']) * 100, 0)
+        daily_df['IdealCycleRatePerMin'] = daily_df['AvgCapacity'] / 60
+        daily_df['TheoreticalRunTime'] = np.where(daily_df['IdealCycleRatePerMin'] > 0, daily_df['TotalPackQty'] / daily_df['IdealCycleRatePerMin'], 0)
+        daily_df['Performance'] = np.where(daily_df['OperatingTime'] > 0, (daily_df['TheoreticalRunTime'] / daily_df['OperatingTime']) * 100, 0)
+        daily_df['Performance'] = daily_df['Performance'].apply(lambda x: min(x, 100))
+        daily_df['OEE'] = (daily_df['Availability'] / 100) * (daily_df['Performance'] / 100) * (daily_df['Quality'] / 100) * 100
+        
+        # --- Display Trend Charts ---
+        st.subheader("روند کلی OEE و اجزای آن")
+        fig_trend = px.line(daily_df, x="Date", y=["OEE", "Availability", "Performance", "Quality"], 
+                            title="روند روزانه OEE، دسترسی، عملکرد و کیفیت",
+                            labels={"value": "درصد (%)", "Date": "تاریخ"},
+                            template="plotly_dark") # استفاده از تم تیره برای ظاهر حرفه‌ای‌تر
+        fig_trend.update_layout(legend_title_text='شاخص', height=500)
+        st.plotly_chart(fig_trend, use_container_width=True)
+        
+        st.markdown("---")
+        
+        st.subheader("روند روزانه تولید (بسته) و توقف (Downtime)")
+        
+        fig_dual = go.Figure()
+
+        fig_dual.add_trace(go.Bar(
+            x=daily_df['Date'],
+            y=daily_df['TotalGoodQty'],
+            name='تولید خالص (بسته)',
+            yaxis='y1',
+            marker_color='skyblue'
+        ))
+
+        fig_dual.add_trace(go.Scatter(
+            x=daily_df['Date'],
+            y=daily_df['TotalDowntime'],
+            name='توقف کل (دقیقه)',
+            yaxis='y2',
+            mode='lines+markers',
+            marker_color='red'
+        ))
+
+        fig_dual.update_layout(
+            title='تحلیل دوگانه روند تولید و توقف',
+            template="plotly_dark",
+            yaxis=dict(
+                title='تولید خالص (بسته)',
+                titlefont=dict(color='skyblue'),
+                tickfont=dict(color='skyblue')
+            ),
+            yaxis2=dict(
+                title='توقف کل (دقیقه)',
+                titlefont=dict(color='red'),
+                tickfont=dict(color='red'),
+                overlaying='y',
+                side='right'
+            ),
+            legend=dict(x=0, y=1.1, orientation="h")
+        )
+        st.plotly_chart(fig_dual, use_container_width=True)
+
+
+# --- صفحه داشبورد و شاخص‌های کلیدی (جامع) ---
+elif st.session_state.page == "📊 Dashboard & KPIs":
+    st.header("📊 داشبورد تحلیل جامع عملکرد")
     
-    # --- Connection Status Check (FIXED) ---
+    # --- Connection Status Check ---
     try:
-        # Using select("*", count='exact').limit(0) is the correct and safest way to get row count via PostgREST
         prod_count_response = supabase.table(PROD_TABLE).select("*", count='exact').limit(0).execute() 
         err_count_response = supabase.table(ERROR_TABLE).select("*", count='exact').limit(0).execute() 
         
@@ -413,14 +524,12 @@ elif st.session_state.page == "Data Analyzing Dashboard":
         st.error(f"❌ خطای حیاتی: اتصال به Supabase قطع است. لطفاً وضعیت API Key و جداول را بررسی کنید. (جزئیات خطا: {e})")
         st.stop()
     st.markdown("---")
-    # --- End Connection Check ---
-
+    
     df_prod_all = load_data_from_supabase_tables(PROD_TABLE)
     df_err_all = load_data_from_supabase_tables(ERROR_TABLE)
 
     if df_prod_all.empty:
         st.warning("داده‌ای برای تحلیل وجود ندارد. لطفاً ابتدا از بخش 'بارگذاری فایل‌ها'، داده‌ها را درج کنید.")
-        st.info(f"اطلاعات از جداول `{PROD_TABLE}` و `{ERROR_TABLE}` بارگذاری می‌شود.")
         st.markdown("---")
     else:
         # --- Filters ---
@@ -451,199 +560,115 @@ elif st.session_state.page == "Data Analyzing Dashboard":
             (df_err_all['Date'] <= selected_end_date)
         ].copy()
 
-        unique_machines = ['All Lines'] + sorted(df_prod_filtered["ProductTypeForTon"].unique().tolist())
+        unique_machines = ['Total Production'] + sorted(df_prod_filtered["ProductTypeForTon"].unique().tolist())
         with col_filters:
             selected_machine = st.selectbox("انتخاب خط تولید:", unique_machines)
 
-        if selected_machine != 'All Lines':
+        if selected_machine != 'Total Production':
             df_prod_filtered = df_prod_filtered[
                 df_prod_filtered["ProductTypeForTon"] == selected_machine
             ].copy()
+            # فیلتر کردن خطاهای مربوط به ماشین انتخاب شده (فرض بر این است که نام ماشین در Error Data به حروف کوچک ذخیره می‌شود)
             df_err_filtered = df_err_filtered[
-                df_err_filtered["machinetype"] == selected_machine.lower()
+                df_err_filtered["machinetype"].str.contains(selected_machine.lower(), case=False, na=False)
             ].copy()
+
 
         # --- OEE Calculations ---
         oee_pct, line_efficiency_pct, availability_pct, performance_pct, quality_pct, \
             total_down_time_min, total_good_qty, total_pack_qty = calculate_oee_metrics(df_prod_filtered, df_err_filtered)
 
-        # --- Display KPIs (Metrics) ---
-        st.markdown("### شاخص‌های عملکرد کلیدی (KPIs)")
+        # ----------------------------------------------------------------------------------
+        # --- نمایش KPIs (فوق گرافیکی و حرفه‌ای) ---
+        # ----------------------------------------------------------------------------------
+        st.markdown("### شاخص‌های کلیدی عملکرد (KPIs)")
         col1, col2, col3, col4, col5 = st.columns(5)
         
-        def display_metric(col, label, value, color_threshold=85):
-            col.markdown(f"<div style='background-color:#262730; padding: 10px; border-radius: 5px; text-align: center;'>"\
-                         f"<p style='font-size: 14px; margin-bottom: 0; color: #aaa;'>{label}</p>"\
-                         f"<h3 style='margin-top: 5px; color: {'#2ECC71' if value >= color_threshold else '#FF4B4B'};'>{value:,.1f} %</h3>"\
-                         f"</div>", unsafe_allow_html=True)
+        def display_metric_pro(col, label, value, color_threshold=85):
+            # ظاهر حرفه‌ای‌تر با استفاده از رنگ‌های تیره و خطوط باریک
+            color = '#2ECC71' if value >= color_threshold else ('#FFC300' if value >= (color_threshold-15) else '#FF4B4B')
+            col.markdown(f"""
+            <div style='
+                border-left: 5px solid {color}; 
+                border-radius: 4px; 
+                padding: 10px; 
+                text-align: right; 
+                background-color: #1E1E1E;
+                box-shadow: 2px 2px 5px rgba(0,0,0,0.2);
+            '>
+                <p style='font-size: 13px; margin-bottom: 5px; color: #aaa; text-align: left;'>{label}</p>
+                <h2 style='margin-top: 0; color: {color}; font-size: 28px; text-align: left;'>{value:,.1f} %</h2>
+            </div>
+            """, unsafe_allow_html=True)
 
-        display_metric(col1, "OEE", oee_pct, color_threshold=70)
-        display_metric(col2, "Availability", availability_pct, color_threshold=85)
-        display_metric(col3, "Performance", performance_pct, color_threshold=85)
-        display_metric(col4, "Quality", quality_pct, color_threshold=95)
-        display_metric(col5, "Line Efficiency", line_efficiency_pct, color_threshold=70)
-
-        st.markdown("---")
+        # نمایش OEE و اجزای آن
+        display_metric_pro(col1, "OEE (اثربخشی کلی)", oee_pct, color_threshold=75)
+        display_metric_pro(col2, "Availability (دسترسی)", availability_pct, color_threshold=85)
+        display_metric_pro(col3, "Performance (عملکرد)", performance_pct, color_threshold=85)
+        display_metric_pro(col4, "Quality (کیفیت)", quality_pct, color_threshold=95)
+        display_metric_pro(col5, "Line Efficiency (راندمان خط)", line_efficiency_pct, color_threshold=70)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
 
         col_prod, col_downtime = st.columns(2)
         
         with col_prod:
-            col_prod.metric("تولید خالص (بسته)", f"{total_good_qty:,.0f} بسته")
+            st.metric("تولید خالص (بسته)", f"{total_good_qty:,.0f} بسته")
         with col_downtime:
-            col_downtime.metric("توقف کل (Downtime)", f"{total_down_time_min:,.0f} دقیقه")
+            st.metric("توقف کل (Downtime)", f"{total_down_time_min:,.0f} دقیقه")
         
         st.markdown("---")
-
-        # --- OEE Component Breakdown (Gauge/Radial Chart) ---
-        st.subheader("تحلیل اجزای OEE")
         
-        fig_oee = go.Figure()
+        # ----------------------------------------------------------------------------------
+        # --- بخش هوشمند: بینش‌های کلیدی (Intelligent Insights) ---
+        # ----------------------------------------------------------------------------------
+        st.subheader("💡 بینش‌های هوشمند (Key Insights)")
         
-        fig_oee.add_trace(go.Indicator(
-            mode="gauge+number",
-            value=oee_pct,
-            title={'text': "OEE", 'font': {'size': 20}},
-            gauge={'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                   'bar': {'color': "#8E44AD"},
-                   'steps': [{'range': [0, 60], 'color': "#FF5733"}, {'range': [60, 85], 'color': "#FFC300"}],
-                   'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': 85}},
-            domain={'row': 0, 'column': 0}
-        ))
-        
-        components = [("Availability", availability_pct, "#2A8C8C", 85, 0, 1), 
-                      ("Performance", performance_pct, "#00AEEF", 85, 1, 0),
-                      ("Quality", quality_pct, "#2ECC71", 95, 1, 1)]
-                      
-        for title, value, color, threshold, row, col in components:
-             fig_oee.add_trace(go.Indicator(
-                mode="gauge+number",
-                value=value,
-                title={'text': title, 'font': {'size': 16}},
-                gauge={'axis': {'range': [None, 100]},
-                       'bar': {'color': color},
-                       'steps': [{'range': [0, 60], 'color': "#FF5733"}, {'range': [60, threshold], 'color': "#FFC300"}],
-                       'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': threshold}},
-                domain={'row': row, 'column': col}
-            ))
-
-        fig_oee.update_layout(
-            grid={'rows': 2, 'columns': 2, 'pattern': "independent"},
-            height=600,
-            margin=dict(l=20, r=20, t=50, b=20)
-        )
-        st.plotly_chart(fig_oee, use_container_width=True)
+        if total_down_time_min > 0 and availability_pct < 85:
+            st.warning(f"دسترسی خط (Availability) تنها **{availability_pct:.1f}%** است. **{total_down_time_min:,.0f} دقیقه** توقف ثبت شده است. تمرکز بر کاهش توقف ضروری است.")
+        elif performance_pct < 85:
+            st.info(f"عملکرد (Performance) خط **{performance_pct:.1f}%** است. بررسی سرعت‌های تولید (Capacity) و زمان‌های سیکل برای بهبود کارایی الزامی است.")
+        else:
+            st.success("عملکرد کلی خط در وضعیت خوبی قرار دارد. برای حفظ این روند، کیفیت (Quality) را زیر نظر داشته باشید.")
 
         st.markdown("---")
 
-        # --- Charts ---
-        if not df_err_filtered.empty:
-            st.subheader("۱۰ مورد برتر دلایل توقف")
+        # ----------------------------------------------------------------------------------
+        # --- نمودارهای تحلیل جامع (Everything possible) ---
+        # ----------------------------------------------------------------------------------
+        
+        col_charts1, col_charts2 = st.columns(2)
+        
+        with col_charts1:
+            if not df_err_filtered.empty:
+                st.subheader("۱۰ مورد برتر دلایل توقف (Parity of Loss)")
+                
+                # گروه‌بندی بر اساس خطا و فیلتر کردن
+                top_errors = df_err_filtered.groupby("error")["duration"].sum().reset_index()
+                top_errors = top_errors.sort_values(by="duration", ascending=False).head(10)
+
+                # نمودار Bar برای Downtime (فوق گرافیکی)
+                fig_err = px.bar(top_errors, x="error", y="duration",
+                                 title="تحلیل پارِتو: دلایل توقف (بر حسب دقیقه)",
+                                 labels={"duration": "مدت زمان (دقیقه)", "error": "دلیل توقف"},
+                                 color="duration",
+                                 color_continuous_scale=px.colors.sequential.Plotly3,
+                                 template="plotly_dark")
+                fig_err.update_traces(texttemplate='%{y:.1f}', textposition='outside')
+                st.plotly_chart(fig_err, use_container_width=True)
+            else:
+                st.warning("داده‌های خطا برای نمایش دلایل توقف یافت نشد.")
+
+        with col_charts2:
+            st.subheader("توزیع تولید (Ton) بر اساس محصول")
+            total_ton_per_product = df_prod_filtered.groupby("producttypeforton")["ton"].sum().reset_index()
+            total_ton_per_product = total_ton_per_product.sort_values(by="ton", ascending=False)
             
-            top_errors = df_err_filtered.groupby("error")["duration"].sum().reset_index()
-            top_errors = top_errors.sort_values(by="duration", ascending=False).head(10)
-
-            fig_err = px.bar(top_errors, x="error", y="duration",
-                             title="دلایل توقف (بر حسب دقیقه)",
-                             labels={"duration": "مدت زمان (دقیقه)", "error": "دلیل توقف"},
-                             color="duration",
-                             color_continuous_scale=px.colors.sequential.Sunset)
-            fig_err.update_traces(texttemplate='%{y:.1f}', textposition='outside')
-            st.plotly_chart(fig_err, use_container_width=True)
-        
-        st.subheader("مقدار تولید (Ton) بر اساس محصول")
-        total_ton_per_product = df_prod_filtered.groupby("producttypeforton")["ton"].sum().reset_index()
-        total_ton_per_product = total_ton_per_product.sort_values(by="ton", ascending=False)
-        
-        fig_ton = px.treemap(total_ton_per_product, path=[px.Constant("کل محصولات"), 'producttypeforton'], values="ton", 
-                             title="توزیع تولید (Ton) بر اساس محصول",
-                             color="ton", color_continuous_scale=px.colors.sequential.Teal)
-        fig_ton.update_layout(margin=dict(t=50, l=25, r=25, b=25))
-        st.plotly_chart(fig_ton, use_container_width=True)
-
-
-elif st.session_state.page == "Trend Analysis":
-    st.header("⏳ تحلیل روند زمانی (Trend Analysis)")
-
-    df_prod_all = load_data_from_supabase_tables(PROD_TABLE)
-    df_err_all = load_data_from_supabase_tables(ERROR_TABLE)
-
-    if df_prod_all.empty:
-        st.warning("داده‌ای برای تحلیل روند وجود ندارد. لطفاً ابتدا داده‌ها را بارگذاری کنید.")
-    else:
-        # Aggregate data by Date for Trend Analysis
-        daily_summary = df_prod_all.groupby("Date").agg(
-            TotalPackQty=('PackQty', 'sum'),
-            TotalWaste=('Waste', 'sum'),
-            TotalDuration=('Duration', 'sum'), # in hours
-            AvgCapacity=('Capacity', 'mean')
-        ).reset_index()
-        
-        daily_errors = df_err_all.groupby("Date")["Duration"].sum().reset_index().rename(columns={"Duration": "TotalDowntime"}) # in minutes
-
-        daily_df = pd.merge(daily_summary, daily_errors, on="Date", how="left").fillna(0)
-        
-        # OEE/KPI Calculation
-        daily_df['TotalDurationMin'] = daily_df['TotalDuration'] * 60
-        daily_df['OperatingTime'] = daily_df['TotalDurationMin'] - daily_df['TotalDowntime']
-        daily_df['OperatingTime'] = daily_df['OperatingTime'].apply(lambda x: max(0, x))
-        
-        daily_df['Availability'] = np.where(daily_df['TotalDurationMin'] > 0, (daily_df['OperatingTime'] / daily_df['TotalDurationMin']) * 100, 0)
-        
-        daily_df['TotalGoodQty'] = daily_df['TotalPackQty'] - daily_df['TotalWaste']
-        daily_df['Quality'] = np.where(daily_df['TotalPackQty'] > 0, (daily_df['TotalGoodQty'] / daily_df['TotalPackQty']) * 100, 0)
-
-        daily_df['IdealCycleRatePerMin'] = daily_df['AvgCapacity'] / 60
-        daily_df['TheoreticalRunTime'] = np.where(daily_df['IdealCycleRatePerMin'] > 0, daily_df['TotalPackQty'] / daily_df['IdealCycleRatePerMin'], 0)
-        daily_df['Performance'] = np.where(daily_df['OperatingTime'] > 0, (daily_df['TheoreticalRunTime'] / daily_df['OperatingTime']) * 100, 0)
-        daily_df['Performance'] = daily_df['Performance'].apply(lambda x: min(x, 100))
-
-        daily_df['OEE'] = (daily_df['Availability'] / 100) * (daily_df['Performance'] / 100) * (daily_df['Quality'] / 100) * 100
-        
-        
-        # --- Display Charts ---
-        st.subheader("روند OEE و اجزای آن")
-        fig_trend = px.line(daily_df, x="Date", y=["OEE", "Availability", "Performance", "Quality"], 
-                            title="روند روزانه OEE و اجزای آن",
-                            labels={"value": "درصد (%)", "Date": "تاریخ"},
-                            template="plotly_white")
-        fig_trend.update_layout(legend_title_text='شاخص')
-        st.plotly_chart(fig_trend, use_container_width=True)
-
-        st.subheader("روند روزانه تولید (بسته) و توقف (Downtime)")
-        
-        fig_dual = go.Figure()
-
-        fig_dual.add_trace(go.Bar(
-            x=daily_df['Date'],
-            y=daily_df['TotalPackQty'],
-            name='تولید کل (بسته)',
-            yaxis='y1',
-            marker_color='skyblue'
-        ))
-
-        fig_dual.add_trace(go.Scatter(
-            x=daily_df['Date'],
-            y=daily_df['TotalDowntime'],
-            name='توقف کل (دقیقه)',
-            yaxis='y2',
-            mode='lines+markers',
-            marker_color='red'
-        ))
-
-        fig_dual.update_layout(
-            title='روند روزانه تولید و توقف',
-            yaxis=dict(
-                title='تولید کل (بسته)',
-                titlefont=dict(color='skyblue'),
-                tickfont=dict(color='skyblue')
-            ),
-            yaxis2=dict(
-                title='توقف کل (دقیقه)',
-                titlefont=dict(color='red'),
-                tickfont=dict(color='red'),
-                overlaying='y',
-                side='right'
-            ),
-            legend=dict(x=0, y=1.1, orientation="h")
-        )
-        st.plotly_chart(fig_dual, use_container_width=True)
+            # نمودار Treemap برای سهم تولید (فوق گرافیکی)
+            fig_ton = px.treemap(total_ton_per_product, path=[px.Constant("Total Production"), 'producttypeforton'], values="ton", 
+                                 title="سهم هر محصول در تولید کل (بر حسب تناژ)",
+                                 color="ton", 
+                                 color_continuous_scale=px.colors.sequential.Teal,
+                                 template="plotly_dark")
+            fig_ton.update_layout(margin=dict(t=50, l=25, r=25, b=25))
+            st.plotly_chart(fig_ton, use_container_width=True)
