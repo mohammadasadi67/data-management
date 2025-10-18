@@ -39,18 +39,18 @@ def get_supabase_client():
         return supabase
     except Exception as e:
         st.error(f"خطا در اتصال به پایگاه داده Supabase: {e}")
-        st.stop()
+        # در صورت عدم اتصال در هنگام راه اندازی، برنامه متوقف می‌شود.
+        st.stop() 
 
 supabase = get_supabase_client()
 
 # ------------------------------------------------------------------------------
-# --- ۲. توابع کمکی اصلی (شامل خواندن اکسل و رفع خطای دیتابیس) ---
+# --- ۲. توابع کمکی اصلی ---
 # ------------------------------------------------------------------------------
 
 # 🔑 واژه‌نامه برای نقشه‌برداری ستون‌های فارسی اکسل به نام‌های استاندارد انگلیسی (ضروری برای OEE)
-# فرض بر این است که ستون‌های D4:P9 شامل این داده‌ها هستند.
 COLUMN_MAP = {
-    # برای داده‌های Production (D4:P9)
+    # برای داده‌های Production 
     'مقدار کل': 'PackQty', 
     'بسته': 'PackQty',
     'ضایعات': 'Waste',
@@ -58,7 +58,7 @@ COLUMN_MAP = {
     'زمان فعالیت': 'Duration',
     'ظرفیت': 'Capacity',
     'تعداد نفرات': 'Manpower',
-    # برای داده‌های Error (D13:P15)
+    # برای داده‌های Error 
     'مدت زمان': 'Duration', 
 }
 
@@ -95,27 +95,20 @@ def standardize_dataframe_for_oee(df, type='prod'):
 def read_production_data(df_raw_sheet, uploaded_file_name, sheet_name_for_debug, file_date_obj):
     """خوانش و پردازش داده‌های Production از محدوده D4:P9."""
     try:
-        # 1. خوانش هدر (ردیف 3 - ایندکس 2) و داده‌ها (ردیف 4 تا 9 - ایندکس 3 تا 15)
-        # 3:16 -> D تا P
         data_prod = df_raw_sheet.iloc[3:9, 3:16].copy() 
         headers_prod = df_raw_sheet.iloc[2, 3:16].tolist()
         data_prod.columns = headers_prod
         
-        # 2. استخراج نام محصولات/خطوط (C4:C9 - ایندکس 2)
         product_names = df_raw_sheet.iloc[3:9, 2].tolist() 
         
-        # 3. Melt/Unpivot: تبدیل فرمت Wide به Long
         data_prod['ProductTypeForTon'] = [str(p).strip() for p in product_names]
         df_prod = data_prod.melt(id_vars=['ProductTypeForTon'], var_name='MetricName', value_name='MetricValue').dropna(subset=['MetricValue'])
         
-        # 4. Pivot: تبدیل مجدد فرمت Long به Wide بر اساس ستون‌های MetricName
         df_prod = df_prod.pivot_table(index='ProductTypeForTon', columns='MetricName', values='MetricValue', aggfunc='first').reset_index()
         df_prod.columns.name = None
         
-        # 5. استانداردسازی و اضافه کردن متادیتا
         df_prod = standardize_dataframe_for_oee(df_prod, type='prod')
         
-        # Add metadata (Shift is in B2)
         shift = df_raw_sheet.iloc[1, 1].strip() if not pd.isna(df_raw_sheet.iloc[1, 1]) else 'Unknown'
         
         df_prod['Date'] = file_date_obj
@@ -125,26 +118,21 @@ def read_production_data(df_raw_sheet, uploaded_file_name, sheet_name_for_debug,
         return df_prod[['Date', 'Shift', 'Filename', 'ProductTypeForTon', 'PackQty', 'Waste', 'Duration', 'Capacity', 'Ton']]
         
     except Exception as e:
-        # st.error(f"Error in production data parsing: {e}")
         return pd.DataFrame()
 
 
 def read_error_data(df_raw_sheet, sheet_name_for_debug, uploaded_file_name_for_debug, file_date_obj):
     """خوانش و پردازش داده‌های Error از محدوده D13:P15."""
     try:
-        # 1. خوانش هدر (ردیف 12 - ایندکس 11) و داده‌ها (ردیف 13 تا 15 - ایندکس 12 تا 14)
         data_err = df_raw_sheet.iloc[12:15, 3:16].copy()
         headers_err = df_raw_sheet.iloc[11, 3:16].tolist()
         data_err.columns = headers_err
         
-        # 2. استخراج نام ماشین‌ها (C13:C15 - ایندکس 2)
         machine_names = df_raw_sheet.iloc[12:15, 2].tolist() 
         
-        # 3. Melt/Unpivot: تبدیل فرمت Wide به Long
         data_err['MachineType'] = [str(m).strip() for m in machine_names]
         df_err = data_err.melt(id_vars=['MachineType'], var_name='Error', value_name='Duration').dropna(subset=['Duration'])
         
-        # 4. استانداردسازی و اضافه کردن متادیتا
         df_err = standardize_dataframe_for_oee(df_err, type='error')
         
         shift = df_raw_sheet.iloc[1, 1].strip() if not pd.isna(df_raw_sheet.iloc[1, 1]) else 'Unknown'
@@ -156,7 +144,6 @@ def read_error_data(df_raw_sheet, sheet_name_for_debug, uploaded_file_name_for_d
         return df_err[['Date', 'Shift', 'Filename', 'MachineType', 'Error', 'Duration']]
         
     except Exception as e:
-        # st.error(f"Error in error data parsing: {e}")
         return pd.DataFrame()
 
 
@@ -165,7 +152,6 @@ def upload_to_supabase(uploaded_files, bucket_name="production-archive"):
     try:
         for file in uploaded_files:
             file_path = f"{file.name}"
-            # upsert=True allows overwriting
             supabase.storage.from_(bucket_name).upload(file_path, file.getvalue(), file_options={"content-type": file.type, "upsert": True})
         st.success(f"✅ {len(uploaded_files)} فایل با موفقیت به آرشیو ذخیره شدند.")
         return True
@@ -177,7 +163,7 @@ def upload_to_supabase(uploaded_files, bucket_name="production-archive"):
 def load_data_from_supabase_tables(table_name):
     """بارگذاری داده‌ها از جداول Supabase با رفع مشکل Case Sensitivity."""
     try:
-        # 🚨 Fix: PostgreSQL uses lowercase 'date' by default. Order by 'date'
+        # 🚨 Fix: PostgreSQL uses lowercase 'date' by default.
         response = supabase.table(table_name).select("*").order("date", desc=False).execute()
         data = response.data
         if not data:
@@ -189,7 +175,7 @@ def load_data_from_supabase_tables(table_name):
         if 'date' in df.columns:
             df['Date'] = pd.to_datetime(df['date']).dt.date
             df.drop(columns=['date'], inplace=True) 
-        elif 'Date' in df.columns: # Fallback
+        elif 'Date' in df.columns: 
             df['Date'] = pd.to_datetime(df['Date']).dt.date
 
         # اطمینان از تبدیل ستون‌ها به اعداد
@@ -202,7 +188,7 @@ def load_data_from_supabase_tables(table_name):
         return df
 
     except Exception as e:
-        # st.error(f"خطا در بارگذاری داده‌ها از Supabase برای جدول {table_name}: {e}")
+        # در صورت بروز خطا در زمان بارگذاری، به صورت موقت خالی برمی‌گرداند.
         return pd.DataFrame()
 
 def insert_to_db(df, table_name):
@@ -232,60 +218,35 @@ def insert_to_db(df, table_name):
         return False
         
 def calculate_oee_metrics(df_prod, df_err):
-    """محاسبه OEE و اجزای آن (Availability, Performance, Quality, Line Efficiency)"""
+    """محاسبه OEE و اجزای آن."""
     if df_prod.empty:
         return 0, 0, 0, 0, 0, 0, 0, 0
 
-    # 1. Planned Production Time (Total Duration) - Duration in hours, convert to minutes
     total_planned_time_min = df_prod["Duration"].sum() * 60
-
-    # 2. Down Time (Error Time) - Duration in minutes
     total_down_time_min = df_err["Duration"].sum()
-    
-    # 3. Operating Time
-    operating_time_min = total_planned_time_min - total_down_time_min
-    operating_time_min = max(0, operating_time_min)
+    operating_time_min = max(0, total_planned_time_min - total_down_time_min)
 
-    # KPI 1: Availability (%)
-    availability_pct = 0
-    if total_planned_time_min > 0:
-        availability_pct = (operating_time_min / total_planned_time_min) * 100
+    availability_pct = (operating_time_min / total_planned_time_min) * 100 if total_planned_time_min > 0 else 0
     
-    # 4. Total Production & Quality
     total_pack_qty = df_prod["PackQty"].sum()
     total_waste = df_prod["Waste"].sum()
     total_good_qty = total_pack_qty - total_waste
 
-    # KPI 2: Quality (%)
-    quality_pct = 0
-    if total_pack_qty > 0:
-        quality_pct = (total_good_qty / total_pack_qty) * 100
+    quality_pct = (total_good_qty / total_pack_qty) * 100 if total_pack_qty > 0 else 0
     
-    # 5. Ideal Cycle Rate (Capacity)
     avg_capacity_units_per_hour = df_prod["Capacity"].mean() 
     ideal_cycle_rate_per_min = avg_capacity_units_per_hour / 60 if avg_capacity_units_per_hour > 0 else 0
         
-    # 6. Theoretical Production Time (Ideal Run Time)
-    theoretical_run_time_min = 0 
-    if ideal_cycle_rate_per_min > 0:
-        theoretical_run_time_min = total_pack_qty / ideal_cycle_rate_per_min
+    theoretical_run_time_min = total_pack_qty / ideal_cycle_rate_per_min if ideal_cycle_rate_per_min > 0 else 0
         
-    # KPI 3: Performance (%)
-    performance_pct = 0
-    if operating_time_min > 0:
-        performance_pct = (theoretical_run_time_min / operating_time_min) * 100
-        performance_pct = min(performance_pct, 100) 
+    performance_pct = (theoretical_run_time_min / operating_time_min) * 100 if operating_time_min > 0 else 0
+    performance_pct = min(performance_pct, 100) 
         
-    # KPI 4: OEE (%)
     oee_pct = (availability_pct / 100) * (performance_pct / 100) * (quality_pct / 100) * 100
     
-    # KPI 5: Line Efficiency (Total Yield % against Theoretical Max)
     total_potential_packages = total_planned_time_min * ideal_cycle_rate_per_min
-    line_efficiency_pct = 0
-    if total_potential_packages > 0:
-        line_efficiency_pct = (total_good_qty / total_potential_packages) * 100
-        line_efficiency_pct = min(line_efficiency_pct, 100)
-    
+    line_efficiency_pct = (total_good_qty / total_potential_packages) * 100 if total_potential_packages > 0 else 0
+    line_efficiency_pct = min(line_efficiency_pct, 100)
     
     return oee_pct, line_efficiency_pct, availability_pct, performance_pct, quality_pct, total_down_time_min, total_good_qty, total_pack_qty
 
@@ -359,7 +320,7 @@ def process_and_insert_data(uploaded_files, sheet_name_to_process):
         status.update(label=f"⚠️ {success_count} از {total_files} فایل با موفقیت پردازش شدند. جزئیات را بررسی کنید.", state="error", expanded=True)
         
     st.cache_data.clear() 
-    time.sleep(1) # Wait briefly before rerun
+    time.sleep(1) 
     st.rerun() 
 
 # --- ناوبری اصلی برنامه ---
@@ -368,7 +329,6 @@ if 'page' not in st.session_state:
     st.session_state.page = "Data Analyzing Dashboard" 
 
 st.sidebar.header("منوی برنامه")
-# Contact Me page is removed
 page_options = ["Data Analyzing Dashboard", "Upload Data", "Trend Analysis", "Data Archive"] 
 selected_page_index = page_options.index(st.session_state.page)
 selected_page = st.sidebar.radio("برو به:", options=page_options, index=selected_page_index, key="sidebar_radio")
@@ -403,7 +363,6 @@ if st.session_state.page == "Upload Data":
 
 
 elif st.session_state.page == "Data Archive":
-    # 🚨 Fix: Streamlit button placement and logic updated to prevent APIException
     st.header("🗄️ مدیریت و حذف داده‌های آرشیو")
     
     st.warning("⚠️ این بخش به شما اجازه می‌دهد تا تمام داده‌های یک جدول را حذف کنید. این عمل غیرقابل بازگشت است.")
@@ -416,7 +375,6 @@ elif st.session_state.page == "Data Archive":
     
     delete_password = st.text_input("رمز عبور حذف:", type="password")
     
-    # Button is placed outside the condition
     delete_button_clicked = st.button(
         f"🔥 حذف تمام داده‌های جدول '{table_to_delete}'", 
         type="primary", 
@@ -426,7 +384,7 @@ elif st.session_state.page == "Data Archive":
     if delete_button_clicked:
         if delete_password == ARCHIVE_DELETE_PASSWORD:
             try:
-                # Use a delete command that clears all rows by non-equality on a simple value
+                # Command to delete all rows
                 supabase.table(table_to_delete).delete().neq('date', '1900-01-01').execute() 
                 st.cache_data.clear() 
                 st.success(f"✅ تمام داده‌های جدول **{table_to_delete}** با موفقیت حذف شدند.")
@@ -439,6 +397,17 @@ elif st.session_state.page == "Data Archive":
 
 elif st.session_state.page == "Data Analyzing Dashboard":
     st.header("📈 داشبورد تحلیل OEE و تولید")
+    
+    # 🚨 New: Connection Status Check
+    try:
+        # Simple test query to ensure the connection is active and not just cached
+        supabase.table(PROD_TABLE).select("date").limit(1).execute() 
+        st.success("✅ اتصال به Supabase برقرار است.")
+    except Exception as e:
+        st.error(f"❌ خطای حیاتی: اتصال به Supabase قطع است یا کلید منقضی شده است. لطفا وضعیت پایگاه داده را بررسی کنید. (جزئیات خطا: {e})")
+        st.stop()
+    st.markdown("---")
+    # 🚨 End New Section
 
     df_prod_all = load_data_from_supabase_tables(PROD_TABLE)
     df_err_all = load_data_from_supabase_tables(ERROR_TABLE)
@@ -484,7 +453,6 @@ elif st.session_state.page == "Data Analyzing Dashboard":
             df_prod_filtered = df_prod_filtered[
                 df_prod_filtered["ProductTypeForTon"] == selected_machine
             ].copy()
-            # Note: MachineType in error data is stored in lowercase in the DB
             df_err_filtered = df_err_filtered[
                 df_err_filtered["machinetype"] == selected_machine.lower()
             ].copy()
@@ -498,7 +466,6 @@ elif st.session_state.page == "Data Analyzing Dashboard":
         col1, col2, col3, col4, col5 = st.columns(5)
         
         def display_metric(col, label, value, color_threshold=85):
-            # Custom styling for KPI cards
             col.markdown(f"<div style='background-color:#262730; padding: 10px; border-radius: 5px; text-align: center;'>"\
                          f"<p style='font-size: 14px; margin-bottom: 0; color: #aaa;'>{label}</p>"\
                          f"<h3 style='margin-top: 5px; color: {'#2ECC71' if value >= color_threshold else '#FF4B4B'};'>{value:,.1f} %</h3>"\
@@ -568,7 +535,6 @@ elif st.session_state.page == "Data Analyzing Dashboard":
         if not df_err_filtered.empty:
             st.subheader("۱۰ مورد برتر دلایل توقف")
             
-            # Using lowercase column names from DB for filtering/grouping
             top_errors = df_err_filtered.groupby("error")["duration"].sum().reset_index()
             top_errors = top_errors.sort_values(by="duration", ascending=False).head(10)
 
@@ -581,7 +547,6 @@ elif st.session_state.page == "Data Analyzing Dashboard":
             st.plotly_chart(fig_err, use_container_width=True)
         
         st.subheader("مقدار تولید (Ton) بر اساس محصول")
-        # Using lowercase column names from DB for filtering/grouping
         total_ton_per_product = df_prod_filtered.groupby("producttypeforton")["ton"].sum().reset_index()
         total_ton_per_product = total_ton_per_product.sort_values(by="ton", ascending=False)
         
