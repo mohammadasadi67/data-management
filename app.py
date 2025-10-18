@@ -58,6 +58,27 @@ def load_data_from_supabase(table_name):
         st.error(f"Error loading data from Supabase table {table_name}: {e}")
         return pd.DataFrame()
 
+def list_archived_files():
+    """Lists files from the 'archive' Supabase storage bucket."""
+    try:
+        # Use the global supabase client to access Storage
+        response = supabase.storage.from_("archive").list()
+        
+        # Supabase list() returns a list of file metadata dictionaries.
+        if isinstance(response, list):
+            # Filter out the directory listing metadata object (name: '.')
+            files = [f['name'] for f in response if f['name'] != '.']
+            return files
+        else:
+            # Handle potential error dictionaries returned by the API call
+            error_message = response.get('message', 'خطای نامشخص') if isinstance(response, dict) else 'فرمت پاسخ نامعتبر'
+            st.error(f"خطا در لیست کردن فایل‌های آرشیو: {error_message}")
+            return []
+            
+    except Exception as e:
+        st.error(f"خطای کلی در دسترسی به آرشیو Supabase: {e}")
+        return []
+
 def process_uploaded_files(uploaded_files, file_type):
     """Processes uploaded Excel files for production or error data."""
     all_data = []
@@ -469,7 +490,19 @@ def Data_Management():
     # Placeholder for archiving and deletion logic (using Supabase config)
     st.markdown("---")
     st.subheader("آرشیو (Supabase)")
-    st.info("عملیات آرشیو و مدیریت از طریق این بخش انجام می‌شود.")
+    
+    # New logic to list and display archived files
+    if st.button("تازه‌سازی و نمایش لیست آرشیو", key="refresh_archive"):
+        with st.spinner("در حال بارگذاری لیست فایل‌ها..."):
+            st.session_state.archived_files = list_archived_files()
+        
+    if st.session_state.archived_files:
+        st.success(f"تعداد {len(st.session_state.archived_files)} فایل در آرشیو یافت شد.")
+        # Displaying the list of files in a clean dataframe
+        df_files = pd.DataFrame({'نام فایل آرشیو شده': st.session_state.archived_files})
+        st.dataframe(df_files, use_container_width=True, height=200)
+    else:
+        st.info("هیچ فایلی در آرشیو یافت نشد. برای به‌روزرسانی لیست، دکمه تازه‌سازی را بزنید.")
 
 def Contact_Me():
     st.subheader("ارتباط با محمد اسدالله‌زاده")
