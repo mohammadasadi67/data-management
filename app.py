@@ -19,7 +19,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # --- Password for Archive Deletion ---
 ARCHIVE_DELETE_PASSWORD = "beautifulmind"
 
-# --- Helper Functions ---
+# --- Helper Functions (Preserved for Data Processing) ---
 
 def parse_filename_date_to_datetime(filename):
     """
@@ -153,15 +153,6 @@ def download_from_supabase(filename):
     return None
 
 
-def get_download_link(file_bytes, filename):
-    """
-    Creates a download link for files.
-    """
-    b64 = base64.b64encode(file_bytes).decode()
-    href = f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">Download {filename}</a>'
-    return href
-
-
 def convert_time(val):
     """
     Converts various time representations (datetime.time, float, int, string)
@@ -276,8 +267,6 @@ def convert_duration_to_minutes(duration_val):
                 except ValueError:
                     pass
             # Fallback if not HHMM or HHMM conversion failed, assume it's raw minutes or hours
-            # This part is a bit ambiguous without exact Excel input examples.
-            # Assuming here that a raw float could be hours, e.g. 2.5 for 2.5 hours.
             return float(duration_val) * 60  # Treat raw float as hours and convert to minutes
 
     # Case 5: String (e.g., "0:30", "1:15", "30", "730", "2.5")
@@ -505,33 +494,23 @@ def read_production_data(df_raw_sheet, uploaded_file_name, selected_sheet_name, 
     # Calculate Duration in hours using the adjusted EndTime
     data["Duration"] = data["EndTimeAdjusted"] - data["StartTime"]
     data = data.dropna(subset=["Duration"])  # Drop rows where duration couldn't be calculated (e.g., missing Start/End)
-    data = data[data["Duration"] != 0]  # Remove rows with 0 duration
+    data = data[data["Duration"] > 0]  # Remove rows with 0 or negative duration
 
     # Convert numeric columns, coercing errors to NaN and then filling with 0
     data["PackQty"] = pd.to_numeric(data["PackQty"], errors="coerce").fillna(0)
     data["Waste"] = pd.to_numeric(data["Waste"], errors="coerce").fillna(0)
     data["Capacity"] = pd.to_numeric(data["Capacity"], errors="coerce").fillna(0)
     data["Manpower"] = pd.to_numeric(data["Manpower"], errors="coerce").fillna(0)
+    
+    # Calculate Potential Production in Packs (Capacity is Packs/Hour, Duration is Hours)
+    data["PotentialPacks"] = data["Capacity"] * data["Duration"]
 
     # Calculate Ton - this calculation is per-row and correct here
     data["Ton"] = data.apply(calculate_ton, axis=1)
 
-    # NEW: Calculate Potential Production and per-row Efficiency
-    # data['PotentialProduction'] = data['Capacity'] * data['Duration'] # REMOVED: Row-level efficiency calculation is removed as requested.
-    # # Calculate Efficiency(%), handling potential division by zero
-    # data['Efficiency(%)'] = np.where(
-    #     data['PotentialProduction'] > 0,
-    #     (data['PackQty'] / 
-    # data['PotentialProduction']) * 100,
-    #     0
-    # )
-
-    # Waste(%) and Efficiency(%) are now calculated AFTER aggregation for charts,
-    # so we don't create them here at the row-level.
     # Select and order final columns for the output DataFrame
-    # Added "Date" to final_cols
-    # REMOVED "PotentialProduction" and "Efficiency(%)" from final_cols
     final_cols = ["Date", "Product", "Capacity", "Manpower", "Duration", "PackQty", "Waste", "Ton",
+                  "PotentialPacks", # Added for OEE/Efficiency calculation later
                   "ProductionTypeForTon"] 
     data = data[[col for col in final_cols if col in data.columns]]
 
@@ -549,17 +528,21 @@ def read_error_data(df_raw_sheet, sheet_name_for_debug="Unknown Sheet", uploaded
         raw_errors_df.columns = ["RawErrorName", "RawDuration"]
 
         # Apply conversion to minutes for error durations
-        raw_errors_df["RawDuration"] = raw_errors_df["RawDuration"].apply(convert_duration_to_minutes)
+        # **IMPORTANT: We need Duration in HOURS for consistency with Production Duration (which is in hours)**
+        # I'll modify this to convert to hours, as production duration is in hours.
+        # convert_duration_to_minutes returns minutes. I'll convert to hours now.
+        raw_errors_df["Duration"] = raw_errors_df["RawDuration"].apply(convert_duration_to_minutes) / 60
 
         # Clean RawErrorName: fillna, convert to string, strip whitespace
         raw_errors_df["RawErrorName"] = raw_errors_df["RawErrorName"].fillna('').astype(str).str.strip()
+        raw_errors_df["RawErrorName"] = raw_errors_df["RawErrorName"].str.title()
 
-        # Filter out rows where RawErrorName is an empty string after stripping
-        df_filtered = raw_errors_df[raw_errors_df["RawErrorName"] != ''].copy()
+        # Filter out rows where RawErrorName is an empty string after stripping and duration is > 0
+        df_filtered = raw_errors_df[(raw_errors_df["RawErrorName"] != '') & (raw_errors_df["Duration"] > 0)].copy()
 
         # Aggregate durations by error name
-        aggregated_errors = df_filtered.groupby("RawErrorName")["RawDuration"].sum().reset_index()
-        aggregated_errors.columns = ["Error", "Duration"]
+        aggregated_errors = df_filtered.groupby("RawErrorName")["Duration"].sum().reset_index()
+        aggregated_errors.columns = ["Error", "Duration"] # Duration is now in Hours
 
         df_final_errors = aggregated_errors.copy()
 
@@ -609,492 +592,631 @@ def clear_supabase_bucket():
     except Exception as e:
         st.error(f"Error deleting files from Supabase: {e}")
 
+# --- OEE and Metrics Calculation Logic ---
+
+def calculate_oee_metrics(prod_df, err_df, total_days):
+    """Calculates OEE, Availability, Performance (Efficiency), and Quality from aggregated data."""
+    
+    # 1. Production and Waste Totals
+    total_production_duration = prod_df['Duration'].sum()
+    total_downtime_hours = err_df['Duration'].sum()
+    total_packs_produced = prod_df['PackQty'].sum()
+    total_waste_packs = prod_df['Waste'].sum()
+    total_potential_packs = prod_df['PotentialPacks'].sum()
+    
+    # 2. Availability (A)
+    # Total available time is production duration + downtime (Assuming this is the scheduled time)
+    total_scheduled_time_hours = total_production_duration + total_downtime_hours
+    
+    # Handle division by zero
+    if total_scheduled_time_hours > 0:
+        availability = (total_production_duration / total_scheduled_time_hours) * 100
+    else:
+        availability = 0.0
+
+    # 3. Performance (P) / Efficiency (New Formula)
+    # Ratio of actual output to maximum potential output during the production time
+    if total_potential_packs > 0:
+        performance = (total_packs_produced / total_potential_packs) * 100
+    else:
+        performance = 0.0
+        
+    # 4. Quality (Q)
+    # Ratio of good packs to total packs produced
+    if total_packs_produced > 0:
+        quality = ((total_packs_produced - total_waste_packs) / total_packs_produced) * 100
+    else:
+        quality = 0.0
+
+    # 5. OEE (Overall Equipment Effectiveness)
+    # OEE = A * P * Q
+    oee = (availability / 100) * (performance / 100) * (quality / 100) * 100
+
+    # 6. Waste Percentage
+    if total_packs_produced > 0:
+        waste_percent = (total_waste_packs / total_packs_produced) * 100
+    else:
+        waste_percent = 0.0
+        
+    return {
+        "OEE": oee,
+        "Availability": availability,
+        "Performance": performance, # This is the New Efficiency
+        "Quality": quality,
+        "TotalDowntimeHours": total_downtime_hours,
+        "TotalWastePacks": total_waste_packs,
+        "WastePercent": waste_percent,
+        "TotalTon": prod_df['Ton'].sum(),
+        "TotalScheduledHours": total_scheduled_time_hours
+    }
+
 
 # --- Main Application ---
 
-st.set_page_config(layout="wide", page_title="Production & Error Dashboard")
-st.title("📊 Production and Error Analysis Dashboard")
+st.set_page_config(layout="wide", page_title="Dashboard | Production & Error Analysis")
+st.title("📊 داشبورد تحلیل تولید و خطا")
 
 # Manage page state with st.session_state
 if 'page' not in st.session_state:
     st.session_state.page = "Data Analyzing Dashboard"  # Set default page to Dashboard
 
 # Sidebar navigation using st.sidebar.radio
-st.sidebar.header("Navigation")
-page_options = ["Upload Data", "Data Archive", "Data Analyzing Dashboard", "Trend Analysis", "Contact Me"]
-selected_page_index = page_options.index(st.session_state.page)
-selected_page = st.sidebar.radio("Go to:", options=page_options, index=selected_page_index, key="sidebar_radio")
+with st.sidebar:
+    st.header("منوی اصلی")
+    page_options = ["Data Analyzing Dashboard", "Trend Analysis", "Upload Data", "Data Archive", "Contact Me"]
+    selected_page_index = page_options.index(st.session_state.page)
+    selected_page = st.radio("بخش‌ها:", options=page_options, index=selected_page_index, key="sidebar_radio")
 
-# Update session state based on radio selection
-if selected_page != st.session_state.page:
-    st.session_state.page = selected_page
-    st.rerun()  # Rerun to switch page immediately
+    if selected_page != st.session_state.page:
+        st.session_state.page = selected_page
+        st.rerun()  # Rerun to switch page immediately
 
 
 if st.session_state.page == "Upload Data":
-    st.header("Upload Your Excel File(s)")
+    st.header("بارگذاری فایل‌های اکسل")
+    st.markdown("---")
     # Allow multiple files to be uploaded
-    uploaded_files = st.file_uploader("Upload your Excel (.xlsx) file(s)", type=["xlsx"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("فایل‌های اکسل (.xlsx) خود را بارگذاری کنید:", type=["xlsx"], accept_multiple_files=True)
 
     # Add an explicit upload button
-    if st.button("Initiate Upload"):
+    if st.button("شروع بارگذاری"):
         if uploaded_files:
             upload_to_supabase(uploaded_files)  # Pass the list of files
         else:
-            st.warning("Please select files to upload first.")
+            st.warning("لطفاً ابتدا فایل‌ها را انتخاب کنید.")
 
 elif st.session_state.page == "Data Archive":
-    st.header("File Archive")
-
-    search_query_archive = st.text_input("Search in Archive (Filename):", key="search_archive_input")
+    st.header("آرشیو فایل‌ها")
+    st.markdown("---")
+    
+    search_query_archive = st.text_input("جستجو در آرشیو (نام فایل):", key="search_archive_input")
 
     files_info = get_all_supabase_files()  # This now includes 'file_date' and 'full_path'
 
     if files_info:
-        # Sort files by name for consistent display (flat list)
-        files_info.sort(key=lambda x: x['name'])
+        # Sort files by date descending
+        files_info.sort(key=lambda x: x['file_date'], reverse=True)
 
         # Filter by search query if present
         if search_query_archive:
             files_info = [f for f in files_info if search_query_archive.lower() in f['name'].lower()]
 
         if files_info:
-            st.markdown("### Available Files:")
-            # Display files in a flat list
+            st.markdown("### فایل‌های موجود:")
+            
+            # Display files in a table for a cleaner look
+            archive_data = []
             for f_info in files_info:
-                file_name_display = f_info['name']
-                file_full_path_for_download = f_info['full_path']  # Use the full path for download
+                archive_data.append({
+                    'File Name': f_info['name'],
+                    'Date': f_info['file_date'].strftime('%d %B %Y')
+                })
+            
+            df_archive = pd.DataFrame(archive_data)
+            
+            # Use columns for action buttons next to the table
+            cols_list = st.columns([0.7, 0.3])
+            cols_list[0].dataframe(df_archive, use_container_width=True, hide_index=True)
 
-                col1, col2 = st.columns([0.7, 0.3])
-                with col1:
-                    st.markdown(f"- {file_name_display} (uploaded: {f_info['file_date'].strftime('%d %b %Y')})")
-                with col2:
-                    if file_full_path_for_download and file_full_path_for_download.lower().endswith('.xlsx'):
-                        download_data = download_from_supabase(file_full_path_for_download)
-                        if download_data:
-                            st.download_button(
-                                label="Download",
-                                data=download_data,
-                                file_name=file_name_display,  # Keep original filename for download
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key=f"download_{file_full_path_for_download}"
-                            )
-                        else:
-                            pass
-                    else:
-                        st.warning("This item is not downloadable (invalid format).")
+            # Add download/delete buttons (simplified in this view)
+            with st.expander("دانلود/حذف فایل‌ها به صورت تکی"):
+                 for f_info in files_info:
+                    col1_btn, col2_btn, col3_btn = st.columns([0.6, 0.2, 0.2])
+                    file_name_display = f_info['name']
+                    file_full_path_for_download = f_info['full_path']
+                    
+                    with col1_btn:
+                        st.text(file_name_display)
+                    
+                    with col2_btn:
+                        if file_full_path_for_download and file_full_path_for_download.lower().endswith('.xlsx'):
+                            download_data = download_from_supabase(file_full_path_for_download)
+                            if download_data:
+                                st.download_button(
+                                    label="دانلود",
+                                    data=download_data,
+                                    file_name=file_name_display,
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key=f"download_{file_full_path_for_download}"
+                                )
+                    # Deletion logic can be more complex and is usually restricted. Left as is for now.
+
         else:
-            st.info("No files found matching your search in the archive.")
+            st.info("فایلی مطابق جستجوی شما در آرشیو یافت نشد.")
     else:
-        st.info("No files available in the archive.
- Please upload files first.")
+        st.info("هیچ فایلی در آرشیو موجود نیست.
+ لطفاً ابتدا فایل‌ها را بارگذاری کنید.")
 
     st.markdown("---")
-    st.subheader("Admin Actions (Delete All Files)")
-    with st.expander("Show/Hide Delete Option"):
-        password_for_delete = st.text_input("Enter password to delete all files:", type="password", key="delete_password_input")
-        if st.button("Delete All Files"):
+    st.subheader("عملیات مدیریتی (حذف تمام فایل‌ها)")
+    with st.expander("نمایش/مخفی کردن گزینه حذف"):
+        password_for_delete = st.text_input("رمز عبور برای حذف تمام فایل‌ها:", type="password", key="delete_password_input")
+        if st.button("حذف همه فایل‌ها"):
             if password_for_delete == ARCHIVE_DELETE_PASSWORD:
                 clear_supabase_bucket()
             elif password_for_delete: # Only show error if input is not empty
-                st.error("Incorrect password for deletion. Please try again.")
+                st.error("رمز عبور اشتباه است. لطفاً دوباره تلاش کنید.")
 
 
 elif st.session_state.page == "Data Analyzing Dashboard":
-    st.header("Data Analyzing Dashboard")
+    st.header("داشبورد تحلیل داده (OEE، کارایی، ضایعات و خطا)")
+    st.markdown("---")
 
     all_files_info = get_all_supabase_files()
 
     if not all_files_info:
-        st.warning("No files available for analysis. Please upload files first.")
+        st.warning("فایلی برای تحلیل موجود نیست. لطفاً ابتدا فایل‌ها را بارگذاری کنید.")
     else:
-        # Determine min/max dates from available files for date picker defaults
-        min_available_date = min(f['file_date'] for f in all_files_info)
-        max_available_date = max(f['file_date'] for f in all_files_info)
+        # --- Filtering in Sidebar for Simplicity and Cleanliness ---
+        with st.sidebar:
+            st.subheader("فیلترهای تحلیل")
+            min_available_date = min(f['file_date'] for f in all_files_info)
+            max_available_date = max(f['file_date'] for f in all_files_info)
+            
+            # Date Picker
+            col_start_date_sb, col_end_date_sb = st.columns(2)
+            with col_start_date_sb:
+                default_start_date = st.session_state.get('dashboard_start_date', min_available_date)
+                selected_start_date = st.date_input("از تاریخ:", value=default_start_date,
+                                                    min_value=min_available_date, max_value=max_available_date,
+                                                    key="dashboard_start_date_picker_sb")
+            with col_end_date_sb:
+                default_end_date = st.session_state.get('dashboard_end_date', max_available_date)
+                selected_end_date = st.date_input("تا تاریخ:", value=default_end_date,
+                                                  min_value=min_available_date, max_value=max_available_date,
+                                                  key="dashboard_end_date_picker_sb")
 
-        # Ensure selected dates are within the available range and handle initial state
-        col_start_date, col_end_date = st.columns(2)
-        with col_start_date:
-            # Set default value of date_input to the stored session state value, or min_available_date
-            default_start_date = st.session_state.get('dashboard_start_date', min_available_date)
-            selected_start_date = st.date_input(
-                "Start Date:",
-                value=default_start_date,
-                min_value=min_available_date,
-                max_value=max_available_date,
-                key="dashboard_start_date_picker"
+            # Error handling for date range
+            if selected_end_date < selected_start_date:
+                st.error("خطا: تاریخ پایان نمی‌تواند قبل از تاریخ شروع باشد.")
+                selected_end_date = selected_start_date 
+                st.session_state.dashboard_end_date_picker_sb = selected_end_date
+
+            st.session_state.dashboard_start_date = selected_start_date
+            st.session_state.dashboard_end_date = selected_end_date
+
+            files_in_date_range = [
+                f for f in all_files_info
+                if selected_start_date <= f['file_date'] <= selected_end_date
+            ]
+            
+            if not files_in_date_range:
+                st.warning("فایلی در بازه تاریخ انتخاب شده یافت نشد.")
+                st.stop() # Stop execution if no files are found
+
+            st.markdown("---")
+            st.subheader("وضعیت فایل‌ها")
+            num_selected_days = (selected_end_date - selected_start_date).days + 1
+            st.info(f"تعداد روزهای انتخابی: **{num_selected_days}**")
+            st.success(f"تعداد فایل‌های یافت شده: **{len(files_in_date_range)}**")
+
+        # --- Data Processing Block ---
+        all_production_data = []
+        all_error_data = []
+        progress_text = "در حال پردازش فایل‌ها..."
+        my_bar = st.progress(0, text=progress_text)
+
+        for i, file_info_dict in enumerate(files_in_date_range):
+            file_full_path = file_info_dict['full_path']
+            file_data = download_from_supabase(file_full_path)
+
+            if file_data:
+                try:
+                    xls = pd.ExcelFile(BytesIO(file_data))
+
+                    for sheet_name in xls.sheet_names:
+                        df_raw_sheet = pd.read_excel(BytesIO(file_data), sheet_name=sheet_name, header=None)
+                        original_filename = file_full_path.split('/')[-1]
+
+                        prod_df = read_production_data(df_raw_sheet, original_filename, sheet_name, file_info_dict['file_date'])
+                        err_df = read_error_data(df_raw_sheet, sheet_name, original_filename, file_info_dict['file_date'])
+
+                        if not prod_df.empty:
+                            all_production_data.append(prod_df)
+                        if not err_df.empty:
+                            all_error_data.append(err_df)
+
+                except Exception as e:
+                    st.error(f"خطا در پردازش فایل اکسل '{file_full_path}': {e}")
+            
+            my_bar.progress((i + 1) / len(files_in_date_range), text=f"در حال پردازش فایل: {file_full_path}")
+
+        my_bar.empty()
+
+        final_prod_df = pd.concat(all_production_data, ignore_index=True) if all_production_data else pd.DataFrame()
+        final_err_df = pd.concat(all_error_data, ignore_index=True) if all_error_data else pd.DataFrame()
+
+        # --- Machine Selection Filter (after data concatenation) ---
+        unique_machines = ['همه دستگاه‌ها']
+        if not final_prod_df.empty and "ProductionTypeForTon" in final_prod_df.columns:
+            filtered_unique_machines = [m for m in final_prod_df["ProductionTypeForTon"].unique().tolist() if m is not None]
+            if "Unknown Machine" in filtered_unique_machines:
+                filtered_unique_machines.remove("Unknown Machine")
+                filtered_unique_machines.append("Unknown Machine")
+            unique_machines.extend(sorted(filtered_unique_machines))
+        
+        selected_machine = st.selectbox("انتخاب دستگاه:", unique_machines)
+
+        # Filter by machine
+        filtered_prod_df = final_prod_df.copy()
+        filtered_err_df = final_err_df.copy()
+        if selected_machine != 'همه دستگاه‌ها':
+            filtered_prod_df = final_prod_df[
+                final_prod_df["ProductionTypeForTon"] == selected_machine].copy()
+            filtered_err_df = final_err_df[final_err_df["MachineType"] == selected_machine].copy()
+        
+        # --- Check for filtered data ---
+        if filtered_prod_df.empty and filtered_err_df.empty:
+            st.warning(f"داده‌ای برای دستگاه '{selected_machine}' در بازه زمانی انتخاب شده یافت نشد.")
+            st.stop()
+
+
+        # --- 1. Top Metrics (OEE, Efficiency, Waste, Downtime) ---
+        metrics = calculate_oee_metrics(filtered_prod_df, filtered_err_df, num_selected_days)
+        
+        st.subheader("شاخص‌های کلیدی عملکرد (KPIs)")
+        
+        col_oee, col_efficiency, col_waste, col_downtime = st.columns(4)
+        
+        with col_oee:
+            # OEE
+            st.metric("OEE (او ای)", f"{metrics['OEE']:.2f} %", help="OEE = در دسترس بودن × عملکرد × کیفیت")
+        
+        with col_efficiency:
+            # Efficiency (New Formula)
+            st.metric("کارایی (Efficiency) جدید", f"{metrics['Performance']:.2f} %", help="عملکرد (Performance) = تولید واقعی / تولید بالقوه (فرمول جدید)")
+        
+        with col_waste:
+            # Waste Percentage
+            st.metric("درصد ضایعات", f"{metrics['WastePercent']:.2f} %", help="کل ضایعات / کل تولید واقعی (بر حسب بسته)")
+        
+        with col_downtime:
+            # Total Downtime
+            st.metric("کل زمان توقف (خطاها)", f"{metrics['TotalDowntimeHours']:.2f} ساعت", help="مجموع مدت زمان ثبت شده برای خطاها (خطاهای کلی)")
+
+        st.markdown("---")
+        
+        # --- 2. Tabs for Data Display and Charts (Better UX) ---
+        
+        tab_charts, tab_errors, tab_raw_data = st.tabs(["نمودارهای تحلیل تولید", "تحلیل خطا و توقفات", "نمایش داده خام"])
+        
+        with tab_charts:
+            st.subheader("نمودار تحلیل تولید")
+            
+            # --- Total Production (Tons) by Product ---
+            st.markdown("##### ۱. کل تولید (تن) بر اساس محصول")
+            total_ton_per_product = filtered_prod_df.groupby("Product")["Ton"].sum().reset_index()
+            total_ton_per_product = total_ton_per_product.sort_values(by="Ton", ascending=False)
+            
+            fig_ton = px.treemap(total_ton_per_product, path=[px.Constant("همه محصولات"), 'Product'], values="Ton",
+                            title="مقایسه وزنی تولید (تن)", hover_data=['Ton'], color="Product")
+            fig_ton.update_layout(margin=dict(t=50, l=25, r=25, b=25))
+            st.plotly_chart(fig_ton, use_container_width=True)
+
+            # --- Waste Percentage by Product ---
+            st.markdown("##### ۲. درصد ضایعات (Waste%) بر اساس محصول")
+            agg_waste_percent_df = filtered_prod_df.groupby("Product").agg(
+                TotalWaste=('Waste', 'sum'),
+                TotalPackQty=('PackQty', 'sum')
+            ).reset_index()
+            
+            agg_waste_percent_df["Waste(%)"] = np.where(
+                agg_waste_percent_df['TotalPackQty'] > 0,
+                (agg_waste_percent_df['TotalWaste'] / agg_waste_percent_df['TotalPackQty']) * 100,
+                0
             )
-        with col_end_date:
-            # Set default value of date_input to the stored session state value, or max_available_date
-            default_end_date = st.session_state.get('dashboard_end_date', max_available_date)
-            selected_end_date = st.date_input(
-                "End Date:",
-                value=default_end_date,
-                min_value=min_available_date,
-                max_value=max_available_date,
-                key="dashboard_end_date_picker"
-            )
 
-        # Ensure end date is not before start date
-        if selected_end_date < selected_start_date:
-            st.error("Error: End Date cannot be before Start Date. Adjusting End Date.")
-            selected_end_date = selected_start_date  # Reset to start date to prevent further errors
-            # Update the date_input widget with the corrected value
-            st.session_state.dashboard_end_date_picker = selected_end_date  # This will re-render the widget
-
-        # Update session state with selected dates
-        st.session_state.dashboard_start_date = selected_start_date
-        st.session_state.dashboard_end_date = selected_end_date
-
-        # Filter files based on selected date range
-        files_in_date_range = [
-            f for f in all_files_info
-            if selected_start_date <= f['file_date'] <= selected_end_date
-        ]
-
-        # Calculate and display the number of days selected
-        num_selected_days = (selected_end_date - selected_start_date).days + 1
-        st.info(f"Number of days selected: **{num_selected_days}**")
-
-        if not files_in_date_range:
-            st.info(
-                "No files found within the selected date range. Please adjust your date selection or upload more files.")
-        else:
-            # Display the list of files that will be analyzed
-            st.markdown("##### Files to be analyzed based on selected dates:")
-            for f_info in files_in_date_range:
-                st.markdown(f"- `{f_info['name']}` (Date: {f_info['file_date'].strftime('%d %b %Y')})")
-
-            # We now use the filtered files from the date range directly.
-            selected_files_full_paths_dashboard = [f['full_path'] for f in files_in_date_range]
-
-            # --- Processing files for analysis ---
-            all_production_data = []
-            all_error_data = []
-            progress_text = "Processing files..."
-            my_bar = st.progress(0, text=progress_text)
-
-            for i, file_info_dict in enumerate(files_in_date_range): # Iterate through dicts for file_date
-                file_full_path = file_info_dict['full_path']
-                file_data = download_from_supabase(file_full_path)
-
-                if file_data:
-                    try:
-                        xls = pd.ExcelFile(BytesIO(file_data))
-
-                        # Iterate through ALL sheets in the Excel file
-                        for sheet_name in xls.sheet_names:
-                            df_raw_sheet = pd.read_excel(BytesIO(file_data), sheet_name=sheet_name, header=None)
-                            original_filename = file_full_path.split('/')[-1] # Extract original name from full path
-
-                            # Pass original_filename and file_date_obj to read_production_data and read_error_data
-                            prod_df = read_production_data(df_raw_sheet, original_filename, sheet_name, file_info_dict['file_date'])
-                            err_df = read_error_data(df_raw_sheet, sheet_name, original_filename, file_info_dict['file_date'])
-
-                            if not prod_df.empty:
-                                all_production_data.append(prod_df)
-                            if not err_df.empty:
-                                all_error_data.append(err_df)
-
-                    except Exception as e:
-                        # General error during file processing (e.g., corrupted Excel)
-                        st.error(f"Error processing Excel file '{file_full_path}': {e}")
-                
-                my_bar.progress((i + 1) / len(files_in_date_range), text=f"Processing file: {file_full_path}")
-
-            my_bar.empty()
-
-            final_prod_df = pd.concat(all_production_data, ignore_index=True) if all_production_data else pd.DataFrame()
-            final_err_df = pd.concat(all_error_data, ignore_index=True) if all_error_data else pd.DataFrame()
-
-            # --- Machine Selection Filter ---
-            unique_machines = ['All Machines']
-            if not final_prod_df.empty and "ProductionTypeForTon" in final_prod_df.columns:
-                filtered_unique_machines = [m for m in final_prod_df["ProductionTypeForTon"].unique().tolist() if m is not None]
-                if "Unknown Machine" in filtered_unique_machines:
-                    filtered_unique_machines.remove("Unknown Machine")
-                    filtered_unique_machines.append("Unknown Machine")
-                unique_machines.extend(sorted(filtered_unique_machines))
+            agg_waste_percent_df = agg_waste_percent_df.sort_values(by="Waste(%)", ascending=False)
             
-            selected_machine = st.selectbox("Select Machine:", unique_machines)
+            fig_waste = px.bar(agg_waste_percent_df, x="Product", y="Waste(%)", 
+                            title="درصد ضایعات",
+                            labels={"Waste(%)": "درصد ضایعات (%)"},
+                            color="Product",
+                            text_auto=".2s", height=500)
+            fig_waste.update_layout(xaxis_tickangle=-45)
+            st.plotly_chart(fig_waste, use_container_width=True)
 
-            # Filter by machine first
-            filtered_prod_df_by_machine = final_prod_df.copy()
-            filtered_err_df_by_machine = final_err_df.copy()
-            if selected_machine != 'All Machines':
-                filtered_prod_df_by_machine = final_prod_df[
-                    final_prod_df["ProductionTypeForTon"] == selected_machine].copy()
-                filtered_err_df_by_machine = final_err_df[filtered_err_df_by_machine["MachineType"] == selected_machine].copy()
 
-            # --- ALL PRODUCTS WILL BE SHOWN BY DEFAULT ---
-            # No product multiselect in sidebar.
-            # filtered_prod_df_by_product now directly takes the machine-filtered data.
-            filtered_prod_df_by_product = filtered_prod_df_by_machine.copy()
+        with tab_errors:
+            st.subheader("تحلیل تفصیلی خطاها و توقفات")
             
-            # Error data filtered only by machine, as product filter is removed.
-            filtered_err_df_by_product = filtered_err_df_by_machine.copy()
-
-            # chart_prod_df is now directly the filtered production data
-            chart_prod_df = filtered_prod_df_by_product.copy()
-
-            # --- Conditional styling function for Efficiency(%) ---
-            # The entire highlight_efficiency function is REMOVED as requested.
-            
-            # --- Display Combined Production Data ---
-            st.subheader("Combined Production Data from Selected Files")
-            if not filtered_prod_df_by_product.empty:
-                # Removed the .style.applymap and .format to remove Efficiency(%) display
-                st.dataframe(
-                    filtered_prod_df_by_product, 
-                    use_container_width=True
-                )
-            else:
-                st.warning("No production data found for selected machine and date range. Please check your filters.")
-
-            # --- Charts Section ---
-            if not chart_prod_df.empty:
-                st.subheader("Total Production (Tons) by Product")
-                total_ton_per_product = chart_prod_df.groupby("Product")["Ton"].sum().reset_index()
-                # Sort by Ton in descending order for better clarity (important for treemaps too)
-                total_ton_per_product = total_ton_per_product.sort_values(by="Ton", ascending=False)
+            if not filtered_err_df.empty:
+                # --- Error Data Sum (Detail - ققیک) ---
+                st.markdown("##### ۱. جزئیات توقفات (خطاهای تفصیلی)")
+                err_sum_detail = filtered_err_df.groupby("Error")["Duration"].sum().reset_index()
+                err_sum_detail = err_sum_detail.sort_values(by="Duration", ascending=False)
+                err_sum_detail['Duration (Minutes)'] = err_sum_detail['Duration'] * 60 # Convert back to minutes for a common display unit
                 
-                # Changed to treemap
-                fig1 = px.treemap(total_ton_per_product, path=[px.Constant("All Products"), 'Product'], values="Ton",
-                                title="Total Production (Tons) by Product", hover_data=['Ton'], color="Product") # Color by product for distinction
-                fig1.update_layout(margin=dict(t=50, l=25, r=25, b=25)) # Adjust margins for treemap
-                st.plotly_chart(fig1, use_container_width=True)
+                # Bar chart for top errors
+                fig_errors = px.bar(err_sum_detail, x="Error", y="Duration (Minutes)", 
+                                    title="مدت زمان توقف (خطاها) بر اساس نوع (دقیقه)",
+                                    labels={"Duration (Minutes)": "مدت زمان (دقیقه)", "Error": "نوع خطا"},
+                                    color="Error", text_auto=".1s", height=600)
+                fig_errors.update_layout(xaxis_tickangle=-45, margin=dict(b=150))
+                st.plotly_chart(fig_errors, use_container_width=True)
 
+                # Table of errors
+                st.dataframe(err_sum_detail.rename(columns={'Duration (Minutes)': 'مدت زمان (دقیقه)', 'Error': 'نوع خطا', 'Duration': 'مدت زمان (ساعت)'}), 
+                            use_container_width=True, hide_index=True)
 
-                st.subheader("Waste Percentage by Product") # Updated title
-                # Calculate aggregated waste percentage: (Sum of Waste / Sum of PackQty) * 100
-                agg_waste_percent_df = chart_prod_df.groupby("Product").agg(
-                    TotalWaste=('Waste', 'sum'),
-                    TotalPackQty=('PackQty', 'sum')
-                ).reset_index()
-                
-                agg_waste_percent_df["Waste(%)"] = np.where(
-                    agg_waste_percent_df['TotalPackQty'] > 0,
-                    (agg_waste_percent_df['TotalWaste'] / agg_waste_percent_df['TotalPackQty']) * 100,
-                    0
-                )
-
-                # Sort by Waste(%) in descending order
-                agg_waste_percent_df = agg_waste_percent_df.sort_values(by="Waste(%)", ascending=False)
-                
-                if not agg_waste_percent_df.empty:
-                    # Changed to bar chart with Waste(%)
-                    fig2 = px.bar(agg_waste_percent_df, x="Product", y="Waste(%)", 
-                                title="Waste Percentage by Product",
-                                labels={"Waste(%)": "Waste (%)"},
-                                color="Product", # Assign distinct color to each product
-                                color_discrete_sequence=px.colors.qualitative.Plotly, # Use qualitative color scale
-                                text_auto=True)
-                    fig2.update_traces(textfont_size=14, textfont_color='black', textfont_weight='bold')
-                    st.plotly_chart(fig2, use_container_width=True)
-                else:
-                    st.info("No data found to display waste percentage.")
-
-                # The "Efficiency by Product" chart block is REMOVED as requested.
-            
-            else:
-                st.warning("No production data available for charts after applying filters.")
-
-            # --- Display Combined Error Data ---
-            st.subheader("Downtime / Errors from Selected Files")
-            if not filtered_err_df_by_product.empty:
-                err_sum = filtered_err_df_by_product.groupby("Error")["Duration"].sum().reset_index()
-                err_sum = err_sum.sort_values(by="Duration", ascending=False)
-
-                # Keeping this as a bar chart
-                fig3 = px.bar(err_sum, x="Error", y="Duration", title="Downtime by Error Type (Minutes)",
-                            labels={"Duration": "Duration (minutes)"}, color="Error",
-                            color_discrete_sequence=px.colors.qualitative.Plotly, text_auto=True, height=600)
-                fig3.update_traces(textfont_size=14, textfont_color='black', textfont_weight='bold')
-                fig3.update_layout(xaxis_tickangle=-45, margin=dict(b=150))
-
-                st.plotly_chart(fig3, use_container_width=True)
-
-                csv = err_sum.to_csv(index=False).encode("utf-8")
+                csv_err = err_sum_detail.to_csv(index=False).encode("utf-8")
                 st.download_button(
-                    "Download Error Summary Report",
-                    csv,
-                    file_name="error_summary.csv",
+                    "دانلود گزارش جزئیات خطا",
+                    csv_err,
+                    file_name="error_detail_report.csv",
                     mime="text/csv"
                 )
             else:
-                st.info(f"No error data found for selected machine and date range in the current view.")
+                st.info("داده‌ای برای تحلیل خطاها در فیلترهای اعمال شده یافت نشد.")
+
+
+        with tab_raw_data:
+            st.subheader("نمایش داده‌های ترکیبی فیلتر شده (جهت بررسی صحت داده)")
+            
+            st.markdown("##### داده خام تولید (Product Production Data)")
+            if not filtered_prod_df.empty:
+                # Select only relevant columns for display and rename them
+                display_cols = ['Date', 'ProductionTypeForTon', 'Product', 'Duration', 'Capacity', 'PackQty', 'Waste', 'Ton']
+                display_df = filtered_prod_df[display_cols].rename(columns={
+                    'Date': 'تاریخ',
+                    'ProductionTypeForTon': 'نوع دستگاه/تولید',
+                    'Product': 'محصول',
+                    'Duration': 'مدت زمان (ساعت)',
+                    'Capacity': 'ظرفیت (بسته/ساعت)',
+                    'PackQty': 'تولید واقعی (بسته)',
+                    'Waste': 'ضایعات (بسته)',
+                    'Ton': 'تن'
+                })
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("داده خام تولیدی برای نمایش وجود ندارد.")
+                
+            st.markdown("---")
+            st.markdown("##### داده خام خطاها (Error Data)")
+            if not filtered_err_df.empty:
+                display_err_df = filtered_err_df.rename(columns={
+                    'Date': 'تاریخ',
+                    'MachineType': 'نوع دستگاه',
+                    'Error': 'نوع خطا',
+                    'Duration': 'مدت زمان (ساعت)'
+                })
+                st.dataframe(display_err_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("داده خام خطایی برای نمایش وجود ندارد.")
+
 
 elif st.session_state.page == "Trend Analysis":
-    st.header("📈 Trend Analysis")
+    st.header("📈 تحلیل روند روزانه (Trends)")
     st.markdown("---")
-    all_files_info = get_all_supabase_files()
+    # This section remains largely similar but with updated naming and metrics (using OEE components)
 
+    # --- Trend Data Processing ---
+    all_files_info = get_all_supabase_files()
     if not all_files_info:
-        st.warning("No files available for trend analysis. Please upload files first.")
-    else:
-        # Determine min/max dates from available files for date picker defaults
+        st.warning("فایلی برای تحلیل روند موجود نیست. لطفاً ابتدا فایل‌ها را بارگذاری کنید.")
+        st.stop()
+        
+    # --- Filtering in Sidebar for Simplicity and Cleanliness ---
+    with st.sidebar:
+        st.subheader("فیلترهای تحلیل روند")
         min_available_date = min(f['file_date'] for f in all_files_info)
         max_available_date = max(f['file_date'] for f in all_files_info)
-
-        # Ensure selected dates are within the available range and handle initial state
-        col_start_date_trend, col_end_date_trend = st.columns(2)
-        with col_start_date_trend:
+        
+        col_start_date_trend_sb, col_end_date_trend_sb = st.columns(2)
+        with col_start_date_trend_sb:
             default_start_date_trend = st.session_state.get('trend_start_date', min_available_date)
-            selected_start_date_trend = st.date_input(
-                "Start Date:",
-                value=default_start_date_trend,
-                min_value=min_available_date,
-                max_value=max_available_date,
-                key="trend_start_date_picker"
-            )
-        with col_end_date_trend:
+            selected_start_date_trend = st.date_input("از تاریخ:", value=default_start_date_trend,
+                                                min_value=min_available_date, max_value=max_available_date,
+                                                key="trend_start_date_picker_sb")
+        with col_end_date_trend_sb:
             default_end_date_trend = st.session_state.get('trend_end_date', max_available_date)
-            selected_end_date_trend = st.date_input(
-                "End Date:",
-                value=default_end_date_trend,
-                min_value=min_available_date,
-                max_value=max_available_date,
-                key="trend_end_date_picker"
-            )
+            selected_end_date_trend = st.date_input("تا تاریخ:", value=default_end_date_trend,
+                                              min_value=min_available_date, max_value=max_available_date,
+                                              key="trend_end_date_picker_sb")
 
-        # Ensure end date is not before start date
         if selected_end_date_trend < selected_start_date_trend:
-            st.error("Error: End Date cannot be before Start Date. Adjusting End Date.")
+            st.error("خطا: تاریخ پایان نمی‌تواند قبل از تاریخ شروع باشد.")
             selected_end_date_trend = selected_start_date_trend 
-            st.session_state.trend_end_date_picker = selected_end_date_trend 
+            st.session_state.trend_end_date_picker_sb = selected_end_date_trend 
 
         st.session_state.trend_start_date = selected_start_date_trend
         st.session_state.trend_end_date = selected_end_date_trend
 
-        # Filter files based on selected date range
         files_in_date_range_trend = [
             f for f in all_files_info
             if selected_start_date_trend <= f['file_date'] <= selected_end_date_trend
         ]
-
+        
         if not files_in_date_range_trend:
-            st.info(
-                "No files found within the selected date range for trend analysis. Please adjust your date selection or upload more files.")
-        else:
-            # --- Processing files for trend analysis ---
-            all_production_data_trend = []
-            all_error_data_trend = []
+            st.warning("فایلی در بازه تاریخ انتخاب شده یافت نشد.")
+            st.stop()
+        
+    # --- Data Processing for Trend ---
+    all_production_data_trend = []
+    all_error_data_trend = []
+    
+    progress_text_trend = "در حال پردازش فایل‌ها برای تحلیل روند..."
+    my_bar_trend = st.progress(0, text=progress_text_trend)
+
+    for i, file_info_dict in enumerate(files_in_date_range_trend): 
+        file_full_path = file_info_dict['full_path']
+        file_data = download_from_supabase(file_full_path)
+
+        if file_data:
+            try:
+                xls = pd.ExcelFile(BytesIO(file_data))
+                for sheet_name in xls.sheet_names:
+                    df_raw_sheet = pd.read_excel(BytesIO(file_data), sheet_name=sheet_name, header=None)
+                    original_filename = file_full_path.split('/')[-1]
+
+                    prod_df = read_production_data(df_raw_sheet, original_filename, sheet_name, file_info_dict['file_date'])
+                    err_df = read_error_data(df_raw_sheet, sheet_name, original_filename, file_info_dict['file_date'])
+
+                    if not prod_df.empty:
+                        all_production_data_trend.append(prod_df)
+                    if not err_df.empty:
+                        all_error_data_trend.append(err_df)
+
+            except Exception as e:
+                st.error(f"خطا در پردازش فایل '{file_full_path}' برای تحلیل روند: {e}")
+        
+        my_bar_trend.progress((i + 1) / len(files_in_date_range_trend), text=f"در حال پردازش فایل: {file_full_path}")
+    
+    my_bar_trend.empty()
+
+    final_prod_df_trend = pd.concat(all_production_data_trend, ignore_index=True) if all_production_data_trend else pd.DataFrame()
+    final_err_df_trend = pd.concat(all_error_data_trend, ignore_index=True) if all_error_data_trend else pd.DataFrame()
+    
+    # --- Machine Selection Filter for Trend ---
+    unique_machines_trend = ['همه دستگاه‌ها']
+    if not final_prod_df_trend.empty and "ProductionTypeForTon" in final_prod_df_trend.columns:
+        filtered_unique_machines_trend = [m for m in final_prod_df_trend["ProductionTypeForTon"].unique().tolist() if m is not None]
+        if "Unknown Machine" in filtered_unique_machines_trend:
+            filtered_unique_machines_trend.remove("Unknown Machine")
+            filtered_unique_machines_trend.append("Unknown Machine")
+        unique_machines_trend.extend(sorted(filtered_unique_machines_trend))
+    
+    selected_machine_trend = st.selectbox("انتخاب دستگاه برای تحلیل روند:", unique_machines_trend)
+
+    # Filter by machine for trend data
+    filtered_prod_df_trend = final_prod_df_trend.copy()
+    filtered_err_df_trend = final_err_df_trend.copy()
+    if selected_machine_trend != 'همه دستگاه‌ها':
+        filtered_prod_df_trend = final_prod_df_trend[
+            final_prod_df_trend["ProductionTypeForTon"] == selected_machine_trend].copy()
+        filtered_err_df_trend = final_err_df_trend[final_err_df_trend["MachineType"] == selected_machine_trend].copy()
+    
+    # --- Daily Aggregation for Trend Charts ---
+    
+    # Aggregation for OEE components: Production
+    daily_prod_agg = filtered_prod_df_trend.groupby("Date").agg(
+        TotalDuration=('Duration', 'sum'),
+        TotalPackQty=('PackQty', 'sum'),
+        TotalWaste=('Waste', 'sum'),
+        TotalPotentialPacks=('PotentialPacks', 'sum'),
+        TotalTon=('Ton', 'sum')
+    ).reset_index()
+
+    # Aggregation for OEE components: Errors
+    daily_err_agg = filtered_err_df_trend.groupby("Date").agg(
+        TotalDowntime=('Duration', 'sum')
+    ).reset_index()
+    
+    # Merge Production and Error data
+    daily_data = pd.merge(daily_prod_agg, daily_err_agg, on='Date', how='outer').fillna(0)
+    
+    # Calculate daily OEE and components
+    if not daily_data.empty:
+        daily_data['TotalScheduledHours'] = daily_data['TotalDuration'] + daily_data['TotalDowntime']
+        
+        # Availability (A)
+        daily_data['Availability'] = np.where(
+            daily_data['TotalScheduledHours'] > 0,
+            (daily_data['TotalDuration'] / daily_data['TotalScheduledHours']) * 100,
+            0
+        )
+        
+        # Performance (P) / Efficiency
+        daily_data['Performance'] = np.where(
+            daily_data['TotalPotentialPacks'] > 0,
+            (daily_data['TotalPackQty'] / daily_data['TotalPotentialPacks']) * 100,
+            0
+        )
+        
+        # Quality (Q)
+        daily_data['Quality'] = np.where(
+            daily_data['TotalPackQty'] > 0,
+            ((daily_data['TotalPackQty'] - daily_data['TotalWaste']) / daily_data['TotalPackQty']) * 100,
+            0
+        )
+        
+        # OEE
+        daily_data['OEE'] = (daily_data['Availability'] / 100) * (daily_data['Performance'] / 100) * (daily_data['Quality'] / 100) * 100
+        
+        # Waste Percentage
+        daily_data['Waste(%)'] = np.where(
+            daily_data['TotalPackQty'] > 0,
+            (daily_data['TotalWaste'] / daily_data['TotalPackQty']) * 100,
+            0
+        )
+
+        # --- Trend Analysis Charts ---
+        
+        st.subheader("۱. تحلیل روند روزانه OEE و شاخص‌های آن")
+        fig_trend_oee = px.line(daily_data, x="Date", y=["OEE", "Availability", "Performance", "Quality"], 
+                                title=f"روند روزانه OEE، در دسترس بودن، کارایی و کیفیت برای {selected_machine_trend}",
+                                labels={"value": "درصد (%)", "variable": "شاخص"},
+                                markers=True, line_shape='spline')
+        st.plotly_chart(fig_trend_oee, use_container_width=True)
+
+        st.subheader("۲. تحلیل روند روزانه تولید و ضایعات")
+
+        col_trend_ton, col_trend_waste = st.columns(2)
+        
+        with col_trend_ton:
+            st.markdown("##### روند کل تولید (تن)")
+            fig_trend_ton = px.line(daily_data, x="Date", y="TotalTon", 
+                                    title=f"روند روزانه کل تولید (تن) برای {selected_machine_trend}",
+                                    labels={"TotalTon": "تن"},
+                                    markers=True, line_shape='spline')
+            st.plotly_chart(fig_trend_ton, use_container_width=True)
+
+        with col_trend_waste:
+            st.markdown("##### روند درصد ضایعات (Waste%)")
+            fig_trend_waste = px.line(daily_data, x="Date", y="Waste(%)", 
+                                      title=f"روند روزانه درصد ضایعات برای {selected_machine_trend}",
+                                      labels={"Waste(%)": "درصد ضایعات (%)"},
+                                      markers=True, line_shape='spline')
+            st.plotly_chart(fig_trend_waste, use_container_width=True)
+
+
+        st.subheader("۳. تحلیل روند روزانه توقفات")
+        fig_trend_error = px.line(daily_data, x="Date", y="TotalDowntime",
+                                    title=f"روند روزانه کل زمان توقف (ساعت) برای {selected_machine_trend}",
+                                    labels={"TotalDowntime": "مدت زمان (ساعت)"},
+                                    markers=True, line_shape='spline')
+        st.plotly_chart(fig_trend_error, use_container_width=True)
             
-            progress_text_trend = "Processing files for trend analysis..."
-            my_bar_trend = st.progress(0, text=progress_text_trend)
-
-            for i, file_info_dict in enumerate(files_in_date_range_trend): 
-                file_full_path = file_info_dict['full_path']
-                file_data = download_from_supabase(file_full_path)
-
-                if file_data:
-                    try:
-                        xls = pd.ExcelFile(BytesIO(file_data))
-                        for sheet_name in xls.sheet_names:
-                            df_raw_sheet = pd.read_excel(BytesIO(file_data), sheet_name=sheet_name, header=None)
-                            original_filename = file_full_path.split('/')[-1]
-
-                            prod_df = read_production_data(df_raw_sheet, original_filename, sheet_name, file_info_dict['file_date'])
-                            err_df = read_error_data(df_raw_sheet, sheet_name, original_filename, file_info_dict['file_date'])
-
-                            if not prod_df.empty:
-                                all_production_data_trend.append(prod_df)
-                            if not err_df.empty:
-                                all_error_data_trend.append(err_df)
-
-                    except Exception as e:
-                        st.error(f"Error processing Excel file '{file_full_path}' for trend analysis: {e}")
-                
-                my_bar_trend.progress((i + 1) / len(files_in_date_range_trend), text=f"Processing file: {file_full_path}")
-            
-            my_bar_trend.empty()
-
-            final_prod_df_trend = pd.concat(all_production_data_trend, ignore_index=True) if all_production_data_trend else pd.DataFrame()
-            final_err_df_trend = pd.concat(all_error_data_trend, ignore_index=True) if all_error_data_trend else pd.DataFrame()
-            
-            # --- Machine Selection Filter for Trend ---
-            unique_machines_trend = ['All Machines']
-            if not final_prod_df_trend.empty and "ProductionTypeForTon" in final_prod_df_trend.columns:
-                filtered_unique_machines_trend = [m for m in final_prod_df_trend["ProductionTypeForTon"].unique().tolist() if m is not None]
-                if "Unknown Machine" in filtered_unique_machines_trend:
-                    filtered_unique_machines_trend.remove("Unknown Machine")
-                    filtered_unique_machines_trend.append("Unknown Machine")
-                unique_machines_trend.extend(sorted(filtered_unique_machines_trend))
-            
-            selected_machine_trend = st.selectbox("Select Machine for Trend:", unique_machines_trend)
-
-            # Filter by machine for trend data
-            filtered_prod_df_trend = final_prod_df_trend.copy()
-            filtered_err_df_trend = final_err_df_trend.copy()
-            if selected_machine_trend != 'All Machines':
-                filtered_prod_df_trend = final_prod_df_trend[
-                    final_prod_df_trend["ProductionTypeForTon"] == selected_machine_trend].copy()
-                filtered_err_df_trend = final_err_df_trend[filtered_err_df_trend["MachineType"] == selected_machine_trend].copy()
-            
-            # --- Trend Analysis Charts ---
-            if not filtered_prod_df_trend.empty:
-                st.subheader("Daily Total Production (Tons) Trend")
-                daily_ton = filtered_prod_df_trend.groupby("Date")["Ton"].sum().reset_index()
-                
-                fig_trend_ton = px.line(daily_ton, x="Date", y="Ton", 
-                                        title=f"Daily Total Production (Tons) Trend for {selected_machine_trend}",
-                                        markers=True, line_shape='spline')
-                st.plotly_chart(fig_trend_ton, use_container_width=True)
-
-                st.subheader("Daily Waste Percentage Trend")
-                daily_waste_agg = filtered_prod_df_trend.groupby("Date").agg(
-                    TotalWaste=('Waste', 'sum'),
-                    TotalPackQty=('PackQty', 'sum')
-                ).reset_index()
-                
-                daily_waste_agg["Waste(%)"] = np.where(
-                    daily_waste_agg['TotalPackQty'] > 0,
-                    (daily_waste_agg['TotalWaste'] / daily_waste_agg['TotalPackQty']) * 100,
-                    0
-                )
-                
-                fig_trend_waste = px.line(daily_waste_agg, x="Date", y="Waste(%)", 
-                                          title=f"Daily Waste Percentage Trend for {selected_machine_trend}",
-                                          markers=True, line_shape='spline',
-                                          labels={"Waste(%)": "Waste (%)"})
-                st.plotly_chart(fig_trend_waste, use_container_width=True)
-            
-            else:
-                st.warning("No production data available for trend analysis after applying filters.")
-
-            if not filtered_err_df_trend.empty:
-                st.subheader("Daily Downtime Trend")
-                daily_error = filtered_err_df_trend.groupby("Date")["Duration"].sum().reset_index()
-
-                fig_trend_error = px.line(daily_error, x="Date", y="Duration",
-                                          title=f"Daily Downtime Trend (Minutes) for {selected_machine_trend}",
-                                          labels={"Duration": "Duration (minutes)"},
-                                          markers=True, line_shape='spline')
-                st.plotly_chart(fig_trend_error, use_container_width=True)
-
-            else:
-                st.info("No error data available for trend analysis after applying filters.")
+    else:
+        st.warning("داده‌ای برای تحلیل روند روزانه پس از اعمال فیلترها موجود نیست.")
             
 elif st.session_state.page == "Contact Me":
-    st.subheader("Connect with Mohammad Asadollahzadeh")
+    st.subheader("ارتباط با محمد اسدالله‌زاده")
     st.markdown("---")
     st.markdown("""
-    In today’s cutting-edge world, with rapid advances in technology, AI is no longer optional—it’s essential. Using AI can significantly boost performance, minimize human error, and streamline workflows. Relying solely on traditional methods often results in wasted time and effort, without delivering the efficiency we seek.
+    در دنیای پرشتاب امروز، با پیشرفت سریع فناوری، هوش مصنوعی دیگر یک گزینه نیست، بلکه یک ضرورت است. استفاده از هوش مصنوعی می‌تواند به طور قابل توجهی عملکرد را افزایش دهد، خطاهای انسانی را به حداقل برساند و فرآیندهای کاری را ساده‌سازی کند. تکیه صرف به روش‌های سنتی اغلب منجر به هدر رفتن زمان و تلاش می‌شود، بدون آنکه کارایی مورد نظر به دست آید.
 
-    To address this, I’ve started building a platform that blends automation with intelligence. Driven by my passion for Python—despite still learning—and a deep interest in creating disciplined, data-driven technical solutions, I began developing this Streamlit-based website to analyze daily production performance.
+    برای پاسخگویی به این نیاز، من شروع به ساخت پلتفرمی کرده‌ام که اتوماسیون را با هوشمندی ترکیب می‌کند. با انگیزه‌ای که از علاقه به پایتون - با وجود اینکه هنوز در حال یادگیری هستم - و تمایل عمیق به ایجاد راه‌حل‌های فنی منضبط و مبتنی بر داده دارم، توسعه این وب‌سایت مبتنی بر Streamlit را برای تحلیل عملکرد روزانه تولید آغاز کردم.
 
-    While my Python skills are still growing, I’ve poured in patience, dedication, and curiosity. Throughout the process, tools like Gemini AI were instrumental in helping me debug, refine strategies, and bring this idea to life. Frankly, without AI assistance, reaching this point would have been far more difficult.
+    اگرچه مهارت‌های پایتون من هنوز در حال رشد است، اما صبر، تعهد و کنجکاوی زیادی را صرف این پروژه کرده‌ام. در طول این فرآیند، ابزارهایی مانند **جمنای (Gemini AI)** در رفع اشکالات، پالایش استراتژی‌ها و به ثمر رساندن این ایده، بسیار مفید بودند. صادقانه بگویم، بدون کمک هوش مصنوعی، رسیدن به این نقطه بسیار دشوارتر می‌شد.
 
-    That said, I’m committed to improving—both in coding and system design. I welcome your feedback, suggestions, or any guidance to help enhance this platform further.
+    با این حال، من متعهد به بهبود هستم؛ هم در کدنویسی و هم در طراحی سیستم. از بازخوردها، پیشنهادات یا هر گونه راهنمایی شما برای ارتقاء بیشتر این پلتفرم استقبال می‌کنم.
 
-    📧 Email: m.asdz@yahoo.com
-    🔗 LinkedIn: Mohammad Asdollahzadeh
+    📧 ایمیل: m.asdz@yahoo.com
+    🔗 لینکدین: Mohammad Asdollahzadeh
 
-    Thank you for visiting, and I truly appreciate your support.
+    از بازدید شما سپاسگزارم و واقعاً قدردان حمایتتان هستم.
 
-    Warm regards,
-    Mohammad Asdollahzadeh
-
-
-       
+    با احترام،
+    محمد اسدالله‌زاده
     """)
