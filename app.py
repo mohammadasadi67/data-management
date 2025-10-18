@@ -935,7 +935,16 @@ elif st.session_state.page == "Data Analyzing Dashboard":
                             text_auto=".2s", height=500)
             fig_waste.update_layout(xaxis_tickangle=-45)
             st.plotly_chart(fig_waste, use_container_width=True)
+# app.py (تقریبا خط ۹۳۷)
 
+    │   │   │   │   filtered_err_df_by_machine = final_err_df[
+    
+    # --- START DEBUG CODE ---
+    st.error(f"Columns in final_err_df are: {final_err_df.columns.tolist()}") 
+    # --- END DEBUG CODE ---
+    
+    # ❱ 938 │   │   │   │   │   final_err_df["MachineType"] == selected_machine].
+    ...
 
         with tab_errors:
             st.subheader("تحلیل تفصیلی خطاها و توقفات")
