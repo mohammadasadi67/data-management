@@ -11,7 +11,8 @@ from datetime import datetime, timedelta, time as datetime_time
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
+px.defaults.template = "plotly_white"
+
 import plotly.graph_objects as go
 import streamlit as st
 from supabase import create_client, Client
@@ -150,7 +151,9 @@ tbody tr:nth-child(odd) td {
 st.markdown(DARK_CSS, unsafe_allow_html=True)
 
 # Global Plotly Theme
-px.defaults.template = "plotly_dark"
+#px.defaults.template = "plotly_dark"
+px.defaults.template = "plotly_white"
+
 px.defaults.width = None
 px.defaults.height = 450
 
