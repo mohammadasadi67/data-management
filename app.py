@@ -166,9 +166,8 @@ if not SUPABASE_KEY:
     st.stop()
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# Admin password from secrets
 ARCHIVE_DELETE_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "change-me")
+
 
 # ===============================
 # UTILITIES
