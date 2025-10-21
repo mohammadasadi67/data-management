@@ -158,15 +158,14 @@ px.defaults.height = 450
 # SUPABASE CONFIG (secrets first)
 # ===============================
 
-SUPABASE_URL = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL") or "https://rlutsxvghmhrgcnqbmch.supabase.co"
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY") or os.getenv("SUPABASE_KEY")
+SUPABASE_URL = "https://rlutsxvghmhrgcnqbmch.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdXRzeHZnaG1ocmdjbnFibWNoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NTEyODk5MSwiZXhwIjoyMDYwNzA0OTkxfQ.VPxJbrPUw4E-MyRGklQMcxveUTznNlWLhPO-mqrHv9c"
 
-if not SUPABASE_KEY:
-    st.error("🔐 Supabase key is not configured. Add `SUPABASE_KEY` to Streamlit secrets.")
-    st.stop()
-
+# Initialize Supabase client globally
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-ARCHIVE_DELETE_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "change-me")
+
+# --- Password for Archive Deletion ---
+ARCHIVE_DELETE_PASSWORD = "beautifulmind"
 
 
 # ===============================
