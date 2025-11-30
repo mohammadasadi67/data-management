@@ -11,7 +11,7 @@ import numpy as np  # Import numpy for numerical operations like np.where
 
 # --- Supabase Configuration ---
 SUPABASE_URL = "https://rlutsxvghmhrgcnqbmch.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdXRzeHZnaG1ocmdjbnFibWNoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDUxMjg5OTEsImV4cCI6MjA2MDcwNDk5MX0.hM-WA6setQ_PZ13rOBEoy2a3rn7wQ6wLFMV9SyBWfHE"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdXRzeHZnaG1ocmdjbnFibWNoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NTEyODk5MSwiZXhwIjoyMDYwNzA0OTkxfQ.VPxJbrPUw4E-MyRGklQMcxveUTznNlWLhPO-mqrHv9c"
 # Initialize Supabase client globally
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
