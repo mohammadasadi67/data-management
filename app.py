@@ -15,13 +15,13 @@ from datetime import datetime, timedelta, time as datetime_time
 # -------------------------------------------------------
 #                 SUPABASE CONFIG (HTTP)
 # -------------------------------------------------------
-SUPABASE_URL = "https://rlutsxvghmhrgcnqbmch.supabase.co/rest/v1/"
+SUPABASE_URL = "https://rlutsxvghmhrgcnqbmch.supabase.co"
 SUPABASE_KEY = "sb_publishable_z2H6jQd7GXX-evMSZQTg8w_mGGn_6ns"
 
 
 # ----------------- SUPABASE: LIST FILES -----------------
 def supabase_list_files():
-    url = f"{SUPABASE_URL}/storage/v1/object/list/uploads"
+    https://rlutsxvghmhrgcnqbmch.supabase.co/storage/v1/object/list/uploads
     headers = {
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json"
