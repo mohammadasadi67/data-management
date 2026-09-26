@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, time as datetime_time
 #                 SUPABASE CONFIG (HTTP)
 # -------------------------------------------------------
 SUPABASE_URL = https://rlutsxvghmhrgcnqbmch.supabase.co/rest/v1/
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdXRzeHZnaG1ocmdjbnFibWNoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDUxMjg5OTEsImV4cCI6MjA2MDcwNDk5MX0.hM-WA6setQ_PZ13rOBEoy2a3rn7wQ6wLFMV9SyBWfHE"
+SUPABASE_KEY = sb_publishable_z2H6jQd7GXX-evMSZQTg8w_mGGn_6ns
 
 
 # ----------------- SUPABASE: LIST FILES -----------------
