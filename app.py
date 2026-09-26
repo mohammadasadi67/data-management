@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, time as datetime_time
 # -------------------------------------------------------
 #                 SUPABASE CONFIG (HTTP)
 # -------------------------------------------------------
-SUPABASE_URL = https://rlutsxvghmhrgcnqbmch.supabase.co/rest/v1/
-SUPABASE_KEY = sb_publishable_z2H6jQd7GXX-evMSZQTg8w_mGGn_6ns
+SUPABASE_URL = "https://rlutsxvghmhrgcnqbmch.supabase.co/rest/v1/"
+SUPABASE_KEY = "sb_publishable_z2H6jQd7GXX-evMSZQTg8w_mGGn_6ns"
 
 
 # ----------------- SUPABASE: LIST FILES -----------------
