@@ -21,20 +21,30 @@ SUPABASE_KEY = "sb_publishable_z2H6jQd7GXX-evMSZQTg8w_mGGn_6ns"
 
 # ----------------- SUPABASE: LIST FILES -----------------
 def supabase_list_files():
-    https://rlutsxvghmhrgcnqbmch.supabase.co/storage/v1/object/list/uploads
+    url = f"{SUPABASE_URL}/storage/v1/object/list/uploads"
     headers = {
         "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey": SUPABASE_KEY,
         "Content-Type": "application/json"
     }
     body = {"prefix": ""}
     response = requests.post(url, json=body, headers=headers)
+
+    if response.status_code != 200:
+        raise Exception(
+            f"Supabase list error {response.status_code}: {response.text}"
+        )
+
     return response.json()
 
 
 # ----------------- SUPABASE: DOWNLOAD FILE -----------------
 def supabase_download_file(filename):
     url = f"{SUPABASE_URL}/storage/v1/object/uploads/{filename}"
-    headers = {"Authorization": f"Bearer {SUPABASE_KEY}"}
+    headers = {
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey": SUPABASE_KEY
+    }
     r = requests.get(url, headers=headers)
     return r.content if r.status_code == 200 else None
 
@@ -44,10 +54,11 @@ def supabase_upload_file(file_obj, filename):
     url = f"{SUPABASE_URL}/storage/v1/object/uploads/{filename}"
     headers = {
         "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey": SUPABASE_KEY,
         "Content-Type": "application/octet-stream"
     }
     r = requests.put(url, data=file_obj, headers=headers)
-    return r.status_code == 200
+    return r.status_code in [200, 201] or r.status_code == 200
 
 
 # ----------------- SUPABASE: DELETE ALL -----------------
@@ -55,9 +66,15 @@ def supabase_delete_all():
     files = supabase_list_files()
     names = [f["name"] for f in files if "name" in f]
 
+    if not names:
+        return
+
     url = f"{SUPABASE_URL}/storage/v1/object/uploads"
-    headers = {"Authorization": f"Bearer {SUPABASE_KEY}",
-               "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey": SUPABASE_KEY,
+        "Content-Type": "application/json"
+    }
     body = {"prefixes": names}
 
     requests.delete(url, json=body, headers=headers)
@@ -842,6 +859,4 @@ pages[choice]()
 
 #############################################
 #        app.py — PART 5 / 5 (END)          #
-#############################################
-
-
+#######
