@@ -285,6 +285,43 @@ def determine_machine_type(name):
 # ===================================================================
 #                      READING THE EXCEL FILES
 # ===================================================================
+def fmt_hours(h):
+    """Hours as a float -> 'HH:MM' (what the app understood from the Excel cell)."""
+    try:
+        total = int(round(float(h) * 60)) % 1440
+        return f"{total // 60:02d}:{total % 60:02d}"
+    except Exception:
+        return ""
+
+
+def explain_row(r):
+    """Short, human-readable guess about why efficiency is above 100%."""
+    cap, dur, qty = r["Capacity"], r["Duration"], r["PackQty"]
+    notes = []
+    if cap > 0 and dur > 0:
+        notes.append(
+            f"Quantity needs {qty / cap:.1f} h at rated capacity, but the sheet shows {dur:.1f} h "
+            f"(implied rate {qty / dur:,.0f}/h vs capacity {cap:,.0f}/h)"
+        )
+        if qty / (cap * dur) >= 5:
+            notes.append("quantity is 5x+ too high: possible extra digit/typo")
+    if dur < 0.5:
+        notes.append("very short duration: check Start/End")
+    if dur > 20:
+        notes.append("very long duration: check midnight / AM-PM")
+    for label, raw in (("Start", r["StartRaw"]), ("End", r["EndRaw"])):
+        if re.fullmatch(r"\d{1,2}(\.0+)?", str(raw)):
+            notes.append(f"{label} is a plain number ({raw}) and may be read as minutes, not hours")
+    return "; ".join(notes)
+
+
+def find_suspicious(prod_df, limit):
+    bad = prod_df[prod_df["Efficiency(%)"] > limit].copy()
+    if not bad.empty:
+        bad["Likely cause"] = bad.apply(explain_row, axis=1)
+    return bad
+
+
 def read_production_data(df_raw, filename, sheet_name, file_date):
     """Raises ValueError with a readable message if the sheet layout is wrong."""
     try:
@@ -308,6 +345,11 @@ def read_production_data(df_raw, filename, sheet_name, file_date):
         raise ValueError("column count does not match the expected layout")
     data.columns = headers
 
+    # Remember where each row came from (df_raw has no header, so index 0 = Excel row 1)
+    data["ExcelRow"] = data.index + 1
+    data["File"] = filename
+    data["Sheet"] = sheet_name
+
     rename_map = {
         "start": "Start",
         "finish": "End",
@@ -330,6 +372,9 @@ def read_production_data(df_raw, filename, sheet_name, file_date):
         if col not in data.columns:
             data[col] = 0
 
+    data["StartRaw"] = data["Start"].astype(str).str.strip()
+    data["EndRaw"] = data["End"].astype(str).str.strip()
+
     data["Product"] = data["Product"].astype(str).str.strip().str.title()
     data = data[~data["Product"].isin(["", "Nan", "0"])]
     if data.empty:
@@ -340,6 +385,8 @@ def read_production_data(df_raw, filename, sheet_name, file_date):
     data["EndTimeAdj"] = np.where(
         data["EndTime"] < data["StartTime"], data["EndTime"] + 24, data["EndTime"]
     )
+    data["StartRead"] = data["StartTime"].apply(fmt_hours)
+    data["EndRead"] = data["EndTime"].apply(fmt_hours)
     data["Duration"] = data["EndTimeAdj"] - data["StartTime"]
     data = data[data["Duration"] > 0].copy()
 
@@ -368,7 +415,9 @@ def read_production_data(df_raw, filename, sheet_name, file_date):
     )
 
     final_cols = [
-        "Date", "Product", "Capacity", "Manpower", "Duration", "PackQty", "Waste",
+        "File", "Sheet", "ExcelRow", "Date", "Product",
+        "StartRaw", "StartRead", "EndRaw", "EndRead",
+        "Capacity", "Manpower", "Duration", "PackQty", "Waste",
         "Ton", "PotentialProduction", "Efficiency(%)", "ProductionTypeForTon",
     ]
     return data[final_cols]
@@ -689,6 +738,25 @@ def page_dashboard():
     if prod_df is None:
         return
 
+    # ---------------- Data check (efficiency above limit) ----------------
+    s1, s2 = st.columns([1, 2])
+    limit = s1.number_input(
+        "Flag efficiency above (%)", min_value=50, max_value=1000, value=100, step=5, key="eff_limit"
+    )
+    suspicious = find_suspicious(prod_df, limit)
+    exclude = False
+    if not suspicious.empty:
+        s2.warning(
+            f"⚠️ {len(suspicious)} row(s) have efficiency above {limit}%. "
+            "Open the **Data check** tab to see exactly where."
+        )
+        exclude = s2.checkbox("Exclude these rows from the numbers and charts", key="eff_exclude")
+    if exclude:
+        prod_df = prod_df.drop(index=suspicious.index)
+        if prod_df.empty:
+            st.warning("Nothing left after excluding the flagged rows.")
+            return
+
     # ---------------- KPI cards ----------------
     qty = prod_df["PackQty"].sum()
     pot = prod_df["PotentialProduction"].sum()
@@ -702,8 +770,8 @@ def page_dashboard():
     k3.metric("Waste", f"{waste_pct:.2f} %")
     k4.metric("Downtime", f"{downtime_h:,.1f} h")
 
-    tab_prod, tab_quality, tab_down, tab_data = st.tabs(
-        ["📦 Production", "🎯 Waste & Efficiency", "🔻 Downtime", "🗂️ Raw data"]
+    tab_prod, tab_quality, tab_down, tab_check, tab_data = st.tabs(
+        ["📦 Production", "🎯 Waste & Efficiency", "🔻 Downtime", "🔍 Data check", "🗂️ Raw data"]
     )
 
     with tab_prod:
@@ -763,6 +831,41 @@ def page_dashboard():
                 "⬇️ Download downtime summary (CSV)",
                 esum.to_csv(index=False).encode(),
                 file_name="error_summary.csv",
+                mime="text/csv",
+            )
+
+    with tab_check:
+        if suspicious.empty:
+            st.success(f"✅ No row has efficiency above {limit}%.")
+        else:
+            st.write(
+                f"**{len(suspicious)} row(s)** above {limit}%. "
+                "Open the file, go to the sheet, and check the Excel row shown."
+            )
+            view = suspicious[
+                ["File", "Sheet", "ExcelRow", "Date", "Product", "StartRaw", "StartRead",
+                 "EndRaw", "EndRead", "Duration", "Capacity", "PackQty",
+                 "PotentialProduction", "Efficiency(%)", "Likely cause"]
+            ].sort_values("Efficiency(%)", ascending=False)
+            view = view.rename(
+                columns={
+                    "ExcelRow": "Excel row",
+                    "StartRaw": "Start (in Excel)",
+                    "StartRead": "Start (read as)",
+                    "EndRaw": "End (in Excel)",
+                    "EndRead": "End (read as)",
+                    "Duration": "Duration (h)",
+                    "PotentialProduction": "Max possible qty",
+                }
+            )
+            show_df(
+                view.style.format({"Efficiency(%)": "{:.1f} %", "Duration (h)": "{:.2f}"}),
+                hide_index=True,
+            )
+            st.download_button(
+                "⬇️ Download flagged rows (CSV)",
+                view.to_csv(index=False).encode(),
+                file_name="flagged_rows.csv",
                 mime="text/csv",
             )
 
