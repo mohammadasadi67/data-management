@@ -163,8 +163,12 @@ def supabase_delete_files(names):
 
 def clear_caches():
     get_all_supabase_files.clear()
+    get_service_files.clear()
+    get_stock_files.clear()
     supabase_download_file.clear()
     load_data.clear()
+    load_service_data.clear()
+    load_stock.clear()
 
 
 # ===================================================================
@@ -487,7 +491,7 @@ def get_all_supabase_files():
     cleaned = []
     for it in items:
         name = it.get("name", "")
-        if name.lower().endswith(".xlsx"):
+        if name.lower().endswith(".xlsx") and not is_service_file(name) and not is_stock_file(name):
             cleaned.append(
                 {"name": name, "file_date": parse_filename_date_to_datetime(name)}
             )
@@ -507,6 +511,465 @@ def safe_get_files():
         with st.expander("Technical details"):
             st.code(str(e))
         return None
+
+
+# ===================================================================
+#              SERVICE / MACHINE HOURS (Excel based, weekly)
+# ===================================================================
+# A weekly file named  Service_DDMMYYYY.xlsx  with two sheets:
+#   "Hours"        ->  Machine | Hours
+#   "Service plan" ->  Machine | Service | Every (hours) | Last done at (hours)
+#                      | Every (days) | Last done on (date)
+# These files are kept out of the production data automatically.
+
+def is_service_file(name):
+    return name.lower().startswith("service")
+
+
+def is_stock_file(name):
+    return name.lower().startswith("stock")
+
+
+def _code(x):
+    """Material / part code as clean text (50000001.0 -> '50000001')."""
+    if pd.isna(x):
+        return ""
+    s = str(x).strip()
+    return s[:-2] if s.endswith(".0") else s
+
+
+def today_local():
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Baghdad")).date()
+    except Exception:
+        return datetime.now().date()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_service_files():
+    out = []
+    for it in supabase_list_files():
+        name = it.get("name", "")
+        if name.lower().endswith(".xlsx") and is_service_file(name):
+            out.append({"name": name, "file_date": parse_filename_date_to_datetime(name)})
+    out.sort(key=lambda f: (f["file_date"], f["name"]))
+    return out
+
+
+def safe_service_files():
+    try:
+        return get_service_files()
+    except Exception as e:
+        st.error("Couldn't load the service files. Check your connection and press **Refresh**.")
+        with st.expander("Technical details"):
+            st.code(str(e))
+        return None
+
+
+def _norm(s):
+    return re.sub(r"[\W_]+", "", str(s).lower())
+
+
+_ALIASES = {
+    "machine": {"machine", "device", "دستگاه"},
+    "hours": {"hours", "hour", "counter", "ساعت", "شمارنده"},
+    "service": {"service", "task", "سرویس"},
+    "every_hours": {"everyhours", "intervalhours", "hoursinterval"},
+    "last_hours": {"lastdoneathours", "lastservicehours", "lasthours"},
+    "every_days": {"everydays", "intervaldays", "daysinterval"},
+    "last_date": {"lastdoneondate", "lastservicedate", "lastdate"},
+}
+
+
+_STOCK_ALIASES = {
+    "code": {"material", "materialcode", "partcode", "code", "کد", "کدکالا"},
+    "desc": {"materialdescription", "description", "desc", "شرح", "شرحکالا"},
+    "bin": {"storagebin", "bin", "location"},
+    "stock": {"currentstock", "stock", "qty", "quantity", "موجودی"},
+    "unit": {"unit", "uom", "واحد"},
+}
+
+_PARTS_ALIASES = {
+    "machine": _ALIASES["machine"],
+    "service": _ALIASES["service"],
+    "code": {"partcode", "material", "materialcode", "code", "کد"},
+    "qty": {"qtyneeded", "qty", "quantity", "needed", "تعداد"},
+}
+
+
+def _canon_columns(df, aliases=None):
+    aliases = aliases or _ALIASES
+    mapping = {}
+    for c in df.columns:
+        n = _norm(c)
+        for canon, names in aliases.items():
+            if n in names and canon not in mapping.values():
+                mapping[c] = canon
+                break
+    return df.rename(columns=mapping)
+
+
+def _find_sheet(xls, keys, exclude=None):
+    for s in xls.sheet_names:
+        if s == exclude:
+            continue
+        n = _norm(s)
+        if any(k in n for k in keys):
+            return s
+    return None
+
+
+def _clean_text(series):
+    s = series.astype(str).str.strip()
+    return s
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_service_data(names):
+    """names: service files sorted oldest -> newest. Hours come from all of them
+    (history), the service plan comes from the newest one."""
+    hour_rows, plan_df, parts_df, problems = [], pd.DataFrame(), pd.DataFrame(), []
+
+    for i, fname in enumerate(names):
+        fdate = parse_filename_date_to_datetime(fname)
+        data = supabase_download_file(fname)
+        if not data:
+            problems.append(f"{fname}: could not be downloaded")
+            continue
+        try:
+            xls = pd.ExcelFile(BytesIO(data))
+        except Exception:
+            problems.append(f"{fname}: not a valid Excel file")
+            continue
+
+        hs = _find_sheet(xls, ("hours", "counter"))
+        if hs is None:
+            problems.append(f"{fname}: no 'Hours' sheet")
+            continue
+        h = _canon_columns(pd.read_excel(xls, sheet_name=hs))
+        if not {"machine", "hours"} <= set(h.columns):
+            problems.append(f"{fname}: the 'Hours' sheet needs the columns Machine and Hours")
+            continue
+        h = h[["machine", "hours"]].copy()
+        h["machine"] = _clean_text(h["machine"])
+        h["hours"] = pd.to_numeric(h["hours"], errors="coerce")
+        h = h[(h["machine"] != "") & (h["machine"].str.lower() != "nan") & h["hours"].notna()]
+        h["date"] = fdate
+        h["file"] = fname
+        hour_rows.append(h)
+
+        if i == len(names) - 1:  # newest file -> service plan
+            # optional sheet: spare parts each service needs
+            pts = _find_sheet(xls, ("part",), exclude=hs)
+            if pts is not None:
+                q = _canon_columns(pd.read_excel(xls, sheet_name=pts, dtype=object), _PARTS_ALIASES)
+                if {"machine", "service", "code"} <= set(q.columns):
+                    if "qty" not in q.columns:
+                        q["qty"] = 1
+                    q = q[["machine", "service", "code", "qty"]].copy()
+                    q["machine"] = _clean_text(q["machine"])
+                    q["service"] = _clean_text(q["service"])
+                    q["code"] = q["code"].map(_code)
+                    q["qty"] = pd.to_numeric(q["qty"], errors="coerce").fillna(1)
+                    q = q[
+                        (q["machine"] != "") & (q["machine"].str.lower() != "nan")
+                        & (q["service"] != "") & (q["service"].str.lower() != "nan")
+                        & (q["code"] != "")
+                    ]
+                    parts_df = q.reset_index(drop=True)
+                else:
+                    problems.append(f"{fname}: the 'Parts needed' sheet needs Machine, Service and Part code")
+
+            ps = _find_sheet(xls, ("service", "plan"), exclude=hs)
+            if ps is None:
+                problems.append(f"{fname}: no 'Service plan' sheet")
+                continue
+            p = _canon_columns(pd.read_excel(xls, sheet_name=ps))
+            if not {"machine", "service"} <= set(p.columns):
+                problems.append(f"{fname}: the 'Service plan' sheet needs the columns Machine and Service")
+                continue
+            for col in ("every_hours", "last_hours", "every_days", "last_date"):
+                if col not in p.columns:
+                    p[col] = np.nan
+            p = p[["machine", "service", "every_hours", "last_hours", "every_days", "last_date"]].copy()
+            p["machine"] = _clean_text(p["machine"])
+            p["service"] = _clean_text(p["service"])
+            p = p[
+                (p["machine"] != "") & (p["machine"].str.lower() != "nan")
+                & (p["service"] != "") & (p["service"].str.lower() != "nan")
+            ]
+            for col in ("every_hours", "last_hours", "every_days"):
+                p[col] = pd.to_numeric(p[col], errors="coerce")
+            p["last_date"] = pd.to_datetime(p["last_date"], errors="coerce")
+            plan_df = p.reset_index(drop=True)
+
+    hours_df = pd.concat(hour_rows, ignore_index=True) if hour_rows else pd.DataFrame()
+    return hours_df, plan_df, parts_df, problems
+
+
+def compute_service_status(hours_df, plan_df, today, warn_days=14, warn_pct=10):
+    """One row per service with remaining hours / days and a status level
+    (0 overdue, 1 due soon, 2 ok, 3 missing data)."""
+    if hours_df.empty or plan_df.empty:
+        return pd.DataFrame()
+
+    latest_date = hours_df["date"].max()
+    window_start = latest_date - timedelta(days=42)
+
+    # current hours + average hours per day for every machine
+    info = {}
+    tmp = hours_df.assign(_k=hours_df["machine"].str.lower())
+    for key, g in tmp.groupby("_k"):
+        g = g.sort_values("date")
+        last = g.iloc[-1]
+        w = g[g["date"] >= window_start]
+        rate = None
+        if len(w) >= 2:
+            span = (w.iloc[-1]["date"] - w.iloc[0]["date"]).days
+            gain = w.iloc[-1]["hours"] - w.iloc[0]["hours"]
+            if span > 0 and gain > 0:
+                rate = float(gain) / span
+        info[key] = (float(last["hours"]), last["date"], rate)
+
+    rows = []
+    for _, p in plan_df.iterrows():
+        cur_h, h_date, rate = info.get(p["machine"].lower(), (None, None, None))
+        every_h, last_h = p["every_hours"], p["last_hours"]
+        every_d = p["every_days"]
+
+        remaining_h = est_days = used_h = None
+        next_h = None
+        if pd.notna(every_h) and every_h > 0 and pd.notna(last_h) and cur_h is not None:
+            next_h = float(last_h + every_h)
+            remaining_h = next_h - cur_h
+            used_h = (1 - remaining_h / every_h) * 100
+            if rate:
+                est_days = remaining_h / rate - (today - h_date).days
+
+        remaining_days = used_d = None
+        if pd.notna(every_d) and every_d > 0 and pd.notna(p["last_date"]):
+            due = p["last_date"].date() + timedelta(days=int(every_d))
+            remaining_days = (due - today).days
+            used_d = (1 - remaining_days / every_d) * 100
+
+        day_values = [d for d in (est_days, remaining_days) if d is not None]
+        days_left = min(day_values) if day_values else None
+        used_vals = [u for u in (used_h, used_d) if u is not None]
+        used_pct = max(used_vals) if used_vals else None
+
+        overdue = (remaining_h is not None and remaining_h <= 0) or (days_left is not None and days_left <= 0)
+        soon = (
+            (remaining_h is not None and remaining_h <= every_h * warn_pct / 100)
+            or (days_left is not None and days_left <= warn_days)
+        )
+        if remaining_h is None and remaining_days is None:
+            level, label = 3, "⚪ Missing data"
+        elif overdue:
+            level, label = 0, "🔴 Overdue"
+        elif soon:
+            level, label = 1, "🟠 Due soon"
+        else:
+            level, label = 2, "🟢 OK"
+
+        due_txt = ""
+        if days_left is not None:
+            due_txt = (today + timedelta(days=int(round(days_left)))).strftime("%d %b %Y")
+
+        rows.append(
+            {
+                "_level": level,
+                "_sort": days_left if days_left is not None else 1e6,
+                "Status": label,
+                "Machine": p["machine"],
+                "Service": p["service"],
+                "Hours now": cur_h,
+                "Next due (h)": next_h,
+                "Hours left": remaining_h,
+                "Days left": days_left,
+                "Due date": due_txt,
+                "Used %": None if used_pct is None else float(min(max(used_pct, 0), 100)),
+                "Avg h/day": rate,
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    return out.sort_values(["_level", "_sort"]).drop(columns="_sort").reset_index(drop=True)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_stock_files():
+    out = []
+    for it in supabase_list_files():
+        name = it.get("name", "")
+        if name.lower().endswith(".xlsx") and is_stock_file(name):
+            out.append({"name": name, "file_date": parse_filename_date_to_datetime(name)})
+    out.sort(key=lambda f: (f["file_date"], f["name"]))
+    return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_stock(fname):
+    """Warehouse stock list -> (one row per material code, problem text)."""
+    data = supabase_download_file(fname)
+    if not data:
+        return pd.DataFrame(), f"{fname}: could not be downloaded"
+    try:
+        raw = pd.read_excel(BytesIO(data), dtype=object)
+    except Exception:
+        return pd.DataFrame(), f"{fname}: not a valid Excel file"
+
+    df = _canon_columns(raw, _STOCK_ALIASES)
+    if not {"code", "stock"} <= set(df.columns):
+        return pd.DataFrame(), f"{fname}: the stock list needs the columns Material and Current stock"
+    for c in ("desc", "bin", "unit"):
+        if c not in df.columns:
+            df[c] = ""
+    df = df[["code", "desc", "bin", "stock", "unit"]].copy()
+    df["code"] = df["code"].map(_code)
+    df["stock"] = pd.to_numeric(df["stock"], errors="coerce").fillna(0)
+    df = df[df["code"] != ""]
+
+    def first_text(s):
+        return next((str(x).strip() for x in s if pd.notna(x) and str(x).strip()), "")
+
+    grouped = df.groupby("code", sort=False).agg(
+        stock=("stock", "sum"),
+        desc=("desc", first_text),
+        unit=("unit", first_text),
+        bins=("bin", lambda s: ", ".join(sorted({str(x).strip() for x in s if pd.notna(x) and str(x).strip()}))),
+    ).reset_index()
+    return grouped, ""
+
+
+def add_parts_check(status, parts_df, stock_df):
+    """Adds a 'Parts' text column (and a hidden _short flag) to the service status."""
+    status = status.copy()
+    if status.empty:
+        return status
+    status["Parts"] = "—"
+    status["_short"] = False
+    if parts_df.empty:
+        return status
+
+    look = stock_df.set_index("code") if not stock_df.empty else None
+    pmap = {}
+    for _, q in parts_df.iterrows():
+        pmap.setdefault((q["machine"].lower(), q["service"].lower()), []).append((q["code"], float(q["qty"])))
+
+    texts, shorts = [], []
+    for _, r in status.iterrows():
+        items = pmap.get((str(r["Machine"]).lower(), str(r["Service"]).lower()))
+        if not items:
+            texts.append("—")
+            shorts.append(False)
+        elif look is None:
+            texts.append("❓ no stock list uploaded")
+            shorts.append(False)
+        else:
+            problems = []
+            for code, need in items:
+                if code not in look.index:
+                    problems.append(f"{code}: not in stock list")
+                else:
+                    have = float(look.at[code, "stock"])
+                    if have < need:
+                        problems.append(f"{code} {str(look.at[code, 'desc'])[:30]}: need {need:g}, have {have:g}")
+            if problems:
+                texts.append("❌ " + " | ".join(problems))
+                shorts.append(True)
+            else:
+                texts.append(f"✅ {len(items)} part(s) in stock")
+                shorts.append(False)
+    status["Parts"] = texts
+    status["_short"] = shorts
+    return status
+
+
+def build_order_list(status, parts_df, stock_df):
+    """Parts still missing for services that are overdue or due soon."""
+    if status.empty or parts_df.empty or stock_df.empty:
+        return pd.DataFrame()
+    urgent = status[status["_level"].isin([0, 1])]
+    keys = {(str(m).lower(), str(s).lower()) for m, s in zip(urgent["Machine"], urgent["Service"])}
+    need = {}
+    for _, q in parts_df.iterrows():
+        if (q["machine"].lower(), q["service"].lower()) in keys:
+            need[q["code"]] = need.get(q["code"], 0.0) + float(q["qty"])
+
+    look = stock_df.set_index("code")
+    rows = []
+    for code, n in need.items():
+        known = code in look.index
+        have = float(look.at[code, "stock"]) if known else 0.0
+        if have < n:
+            rows.append(
+                {
+                    "Part code": code,
+                    "Description": str(look.at[code, "desc"]) if known else "(not in stock list)",
+                    "Needed": n,
+                    "In stock": have,
+                    "To order": n - have,
+                    "Unit": str(look.at[code, "unit"]) if known else "",
+                    "Location": str(look.at[code, "bins"]) if known else "",
+                }
+            )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("To order", ascending=False).reset_index(drop=True)
+
+
+def build_service_template():
+    today = today_local()
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as w:
+        pd.DataFrame(
+            {"Machine": ["GASTI", "125", "200cc", "1000cc"], "Hours": [0, 0, 0, 0]}
+        ).to_excel(w, sheet_name="Hours", index=False)
+
+        pd.DataFrame(
+            {
+                "Machine": ["GASTI", "GASTI", "125"],
+                "Service": ["Oil change", "Full overhaul", "Belt check"],
+                "Every (hours)": [500, 5000, None],
+                "Last done at (hours)": [0, 0, None],
+                "Every (days)": [None, 365, 30],
+                "Last done on (date)": [None, pd.Timestamp(today), pd.Timestamp(today)],
+            }
+        ).to_excel(w, sheet_name="Service plan", index=False)
+
+        pd.DataFrame(
+            {
+                "Machine": ["GASTI", "GASTI"],
+                "Service": ["Oil change", "Oil change"],
+                "Part code": ["50000001", "50000003"],
+                "Qty needed": [2, 1],
+            }
+        ).to_excel(w, sheet_name="Parts needed", index=False)
+
+        pd.DataFrame(
+            {
+                "How to use": [
+                    "1. Every week: copy this file, update the numbers in the 'Hours' sheet and save it as Service_DDMMYYYY.xlsx (today's date).",
+                    "2. Upload it in the app (Upload Data page).",
+                    "3. 'Service plan': one row per service. Fill 'Every (hours)' + 'Last done at (hours)' for hour-based services, "
+                    "and/or 'Every (days)' + 'Last done on (date)' for calendar-based ones. You can leave the other pair empty.",
+                    "4. When a service is done, update 'Last done at (hours)' (and the date) in the next weekly file.",
+                    "5. 'Parts needed' (optional): one row per spare part a service uses (Machine, Service, Part code, Qty needed). "
+                    "Part code = the Material code in your warehouse stock list. Upload the stock list as Stock_DDMMYYYY.xlsx "
+                    "and the app checks that the parts are in stock.",
+                    "6. Machine and service names must be written exactly the same in all sheets.",
+                    "7. The rows in this template are only examples. Replace them with your own machines, services and parts.",
+                    "هر هفته: این فایل را کپی کنید، ساعت‌ها را در برگه‌ی Hours به‌روز کنید و با نام Service_روزماهسال ذخیره و آپلود کنید.",
+                    "وقتی سرویسی انجام شد، ستون Last done را در فایل هفته‌ی بعد به‌روز کنید.",
+                ]
+            }
+        ).to_excel(w, sheet_name="Instructions", index=False)
+
+        for ws in w.book.worksheets:
+            for col in ws.columns:
+                ws.column_dimensions[col[0].column_letter].width = 110 if ws.title == "Instructions" else 24
+    return out.getvalue()
 
 
 # ===================================================================
@@ -600,6 +1063,10 @@ def page_upload():
             - **Sheet name** (or file name) should mention the machine: `GASTI`, `125`, `200` or `1000`.
             - Production table: headers in rows 2–3, data in rows 4–9, columns D–P.
             - Downtime list: from row 12 down, reason in column G and duration in column H.
+            - **Machine hours / service file:** name it `Service_DDMMYYYY.xlsx`
+              (get the template on the 🛠️ Service page). It is kept separate from production data.
+            - **Warehouse stock list:** name it `Stock_DDMMYYYY.xlsx` (columns: Material, Material Description,
+              Storage Bin, Current stock, Unit). The newest one is used for the parts check.
             - Uploading a file with the same name **replaces** the old one.
             """
         )
@@ -668,6 +1135,12 @@ def page_archive():
     files = safe_get_files()
     if files is None:
         return
+    try:  # service files are listed here too
+        files = sorted(
+            files + get_service_files() + get_stock_files(), key=lambda f: (f["file_date"], f["name"])
+        )
+    except Exception:
+        pass
     if not files:
         st.info("The archive is empty. Upload a file to get started.")
         return
@@ -938,6 +1411,151 @@ def page_trends():
 
 
 # ===================================================================
+#                           SERVICE PAGE
+# ===================================================================
+def _describe_service(r):
+    parts = []
+    hl, dl = r["Hours left"], r["Days left"]
+    if pd.notna(hl):
+        parts.append(f"{abs(hl):,.0f} h overdue" if hl <= 0 else f"{hl:,.0f} h left")
+    if pd.notna(dl):
+        parts.append(f"{abs(dl):.0f} days overdue" if dl <= 0 else f"~{dl:.0f} days left")
+    if str(r.get("Parts", "")).startswith("❌"):
+        parts.append("❗ " + str(r["Parts"])[2:])
+    return " · ".join(parts) or "check the data"
+
+
+def page_service():
+    st.header("🛠️ Machine Service")
+    st.caption(
+        "Each week, upload a file named Service_DDMMYYYY.xlsx with the new machine hours "
+        "(📤 Upload Data page). This page does the countdown and the alarms."
+    )
+
+    with st.expander("📥 Excel template & how it works"):
+        st.markdown(
+            """
+            1. Download the template and fill in your machines and services.
+            2. **Every week** copy the file, update the **Hours** sheet, save as `Service_DDMMYYYY.xlsx` and upload it.
+            3. When a service is done, update *Last done at (hours)* (and the date) in the next weekly file.
+            4. The days left are **estimated** from the average hours per day of the last weeks,
+               so after two weekly files you get a countdown in days.
+            """
+        )
+        st.download_button(
+            "⬇️ Download template",
+            build_service_template(),
+            file_name=f"Service_{today_local():%d%m%Y}.xlsx",
+            mime=XLSX_MIME,
+        )
+
+    files = safe_service_files()
+    if files is None:
+        return
+    if not files:
+        st.info("No service file yet. Download the template above, fill it in and upload it on **📤 Upload Data**.")
+        return
+
+    with st.spinner("Reading service files…"):
+        hours_df, plan_df, parts_df, problems = load_service_data(tuple(f["name"] for f in files[-8:]))
+
+    if problems:
+        with st.expander(f"⚠️ {len(problems)} problem(s) in the service files", expanded=True):
+            for p in problems:
+                st.write(f"- {p}")
+
+    if hours_df.empty:
+        st.warning("No machine hours could be read. Check the 'Hours' sheet (columns: Machine, Hours).")
+        return
+
+    today = today_local()
+    latest = hours_df["date"].max()
+    age = (today - latest).days
+    if age > 7:
+        st.warning(f"⏰ Machine hours were last updated on {latest:%d %b %Y} ({age} days ago). Please upload this week's file.")
+    else:
+        st.caption(f"Machine hours as of {latest:%d %b %Y}")
+
+    c1, c2 = st.columns(2)
+    warn_days = c1.number_input("Warn when this many days (or fewer) are left", 1, 90, 14, key="svc_days")
+    warn_pct = c2.number_input("…or when this % of the interval (or less) is left", 1, 50, 10, key="svc_pct")
+
+    status = compute_service_status(hours_df, plan_df, today, warn_days, warn_pct)
+
+    # warehouse stock (optional): newest Stock_*.xlsx
+    stock_df = pd.DataFrame()
+    try:
+        stock_files = get_stock_files()
+    except Exception:
+        stock_files = []
+    if stock_files:
+        stock_df, stock_problem = load_stock(stock_files[-1]["name"])
+        if stock_problem:
+            st.warning(stock_problem)
+        else:
+            st.caption(f"📦 Warehouse stock: {stock_files[-1]['name']} · {len(stock_df):,} items")
+    elif not parts_df.empty:
+        st.info("Your service plan lists parts, but no stock list is uploaded yet. Upload it as Stock_DDMMYYYY.xlsx to check availability.")
+    status = add_parts_check(status, parts_df, stock_df)
+
+    if status.empty:
+        st.warning("No services found in the newest file. Check the 'Service plan' sheet.")
+    else:
+        over = status[status["_level"] == 0]
+        soon = status[status["_level"] == 1]
+
+        k1, k2, k3 = st.columns(3)
+        k1.metric("🔴 Overdue", len(over))
+        k2.metric("🟠 Due soon", len(soon))
+        k3.metric("🟢 OK", int((status["_level"] == 2).sum()))
+
+        for _, r in over.iterrows():
+            st.error(f"**{r['Machine']} – {r['Service']}**: {_describe_service(r)}")
+        for _, r in soon.iterrows():
+            st.warning(f"**{r['Machine']} – {r['Service']}**: {_describe_service(r)}")
+
+        view = status.drop(columns=["_level", "_short"])
+        show_df(
+            view,
+            hide_index=True,
+            column_config={
+                "Hours now": st.column_config.NumberColumn(format="%.0f"),
+                "Next due (h)": st.column_config.NumberColumn(format="%.0f"),
+                "Hours left": st.column_config.NumberColumn(format="%.0f"),
+                "Days left": st.column_config.NumberColumn(format="%.0f"),
+                "Avg h/day": st.column_config.NumberColumn(format="%.1f"),
+                "Used %": st.column_config.ProgressColumn(format="%.0f%%", min_value=0, max_value=100),
+            },
+        )
+        st.download_button(
+            "⬇️ Download service status (CSV)",
+            view.to_csv(index=False).encode(),
+            file_name="service_status.csv",
+            mime="text/csv",
+        )
+        st.caption("Days left = estimated from the average hours per day (needs at least two weekly files), or from the calendar interval.")
+
+        order = build_order_list(status, parts_df, stock_df)
+        if not order.empty:
+            st.subheader("🛒 Parts to order")
+            st.caption("Missing parts for services that are overdue or due soon.")
+            show_df(order, hide_index=True)
+            st.download_button(
+                "⬇️ Download order list (CSV)",
+                order.to_csv(index=False).encode(),
+                file_name="parts_to_order.csv",
+                mime="text/csv",
+            )
+
+    with st.expander("📈 Machine hours history"):
+        fig = px.line(
+            hours_df.sort_values("date"), x="date", y="hours", color="machine",
+            markers=True, title="Machine hours (weekly readings)",
+        )
+        show_chart(fig)
+
+
+# ===================================================================
 #                            CONTACT PAGE
 # ===================================================================
 def page_contact():
@@ -973,6 +1591,7 @@ def page_contact():
 PAGES = {
     "📊 Dashboard": page_dashboard,
     "📈 Trends": page_trends,
+    "🛠️ Service": page_service,
     "📤 Upload Data": page_upload,
     "📁 Data Archive": page_archive,
     "📞 Contact": page_contact,
@@ -990,6 +1609,21 @@ try:
         )
 except Exception:
     st.sidebar.caption("⚠️ Storage not reachable")
+
+try:  # service alarm in the sidebar, visible on every page
+    _sf = get_service_files()
+    if _sf:
+        _h, _p, _pp, _ = load_service_data(tuple(f["name"] for f in _sf[-8:]))
+        _s = compute_service_status(_h, _p, today_local())
+        if not _s.empty:
+            _over = int((_s["_level"] == 0).sum())
+            _soon = int((_s["_level"] == 1).sum())
+            if _over:
+                st.sidebar.error(f"🔴 {_over} service(s) overdue")
+            if _soon:
+                st.sidebar.warning(f"🟠 {_soon} service(s) due soon")
+except Exception:
+    pass
 
 if st.sidebar.button("🔄 Refresh data"):
     clear_caches()
